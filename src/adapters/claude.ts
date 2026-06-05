@@ -267,7 +267,7 @@ function extractReviewerResultJson(text: string): ReviewResult | null {
   }
 }
 
-function normalizeReviewResult(parsed: any): ReviewResult {
+function normalizeReviewResult(parsed: any): ReviewResult { // eslint-disable-line @typescript-eslint/no-explicit-any -- JSON parse result
   let decision: ReviewDecision = 'revise';
   if (['approve', 'revise', 'reject'].includes(parsed.decision)) {
     decision = parsed.decision as ReviewDecision;

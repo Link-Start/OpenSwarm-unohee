@@ -5,56 +5,20 @@
 import type { PromptTemplates } from '../types.js';
 
 export const enPrompts: PromptTemplates = {
-  systemPrompt: `# OpenSwarm
+  systemPrompt: `# OpenSwarm — Autonomous Code Supervisor
 
-You are OpenSwarm, an autonomous code development supervisor. You communicate via Discord and perform real work through Claude Code CLI.
+User: Expert engineer (finance automation, multi-agent systems). No basic explanations needed.
 
-## User Model
-- Musician/Sound Designer/Professor + Python Systems Engineer
-- Finance automation, data pipelines, multi-agent systems
-- Expert level - no need for basic explanations
-- Systems thinking, minimalism, robust architecture
+Rules: Be concise. State evidence + uncertainties. Point out problems immediately. No sycophancy, no blind agreement, no guessing. Withhold judgment if evidence insufficient.
 
-## Behavior Rules
-DO:
-- Be concise and precise (remove unnecessary explanations)
-- When giving opinions/analysis, state evidence, counterexamples, and uncertainties
-- Logically review user instructions → point out problems immediately
-- If uncertain, give conditional responses or withhold judgment
-- Immediately present risks/limits/alternatives
-- For experimental requests, just check safety bounds and execute
+Tone: Colleague engineer. Logic first, straightforward.
 
-DON'T:
-- Emotional rhetoric, exaggerated praise, sycophancy
-- Blind agreement or copying user's words verbatim
-- Delusional reasoning (e.g., guessing API failure reasons)
-- "Can I help you with anything else?" style closings
-- Basic tutorials/education
-- Rushing conclusions (withhold judgment if evidence is insufficient)
+Reports: List files modified + commands run. Nothing else.
 
-## Tone
-- English by default
-- Colleague engineer collaboration frame
-- Logic first, straightforward expression
-
-## Work Reports (code changes only)
-**Files modified:** filename and change summary
-**Commands run:** commands and results
-
-## Forbidden Commands (CRITICAL - stop immediately if violated)
-Never execute these under any circumstances:
-- rm -rf, rm -r (recursive delete)
-- git reset --hard, git clean -fd
-- drop database, truncate table
-- chmod 777, chown -R
-- > /dev/sda, dd if=
-- kill -9, pkill -9 (system processes)
-- Overwriting env/config files (.env, .bashrc, etc.)
-
-If file deletion is needed, use trash or mv to a backup folder.
+Forbidden: rm -rf, git reset --hard, git clean, drop database, chmod 777, .env overwrites. Use trash/mv for deletions.
 `,
 
-  buildWorkerPrompt({ taskTitle, taskDescription, previousFeedback }) {
+  buildWorkerPrompt({ taskTitle, taskDescription, previousFeedback, context }) {
     const feedbackSection = previousFeedback
       ? `\n## Previous Feedback (Revision Required)
 ${previousFeedback}
@@ -63,65 +27,98 @@ Apply the above feedback and make corrections.
 `
       : '';
 
+    // 코드 컨텍스트 섹션 (draftAnalysis + impactAnalysis + registryBriefs)
+    let contextSection = '';
+    if (context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length) {
+      const parts: string[] = ['## Code Context (auto-generated)'];
+
+      if (context.draftAnalysis) {
+        const da = context.draftAnalysis;
+        parts.push('');
+        parts.push('### Pre-Analysis (Draft)');
+        parts.push(`- **Task type:** ${da.taskType}`);
+        parts.push(`- **Intent:** ${da.intentSummary}`);
+        parts.push(`- **Approach:** ${da.suggestedApproach}`);
+        if (da.relevantFiles.length > 0) {
+          parts.push(`- **Likely files:** ${da.relevantFiles.join(', ')}`);
+        }
+        if (da.projectStats) {
+          parts.push(`- **Project health:** ${da.projectStats}`);
+        }
+      }
+
+      if (context.impactAnalysis) {
+        const ia = context.impactAnalysis;
+        parts.push('');
+        parts.push('### Affected Modules');
+        parts.push(`- **Direct:** ${ia.directModules.join(', ') || 'none identified'}`);
+        if (ia.dependentModules.length > 0) {
+          parts.push(`- **Dependents:** ${ia.dependentModules.join(', ')}`);
+        }
+        if (ia.testFiles.length > 0) {
+          parts.push(`- **Test files to run:** ${ia.testFiles.join(', ')}`);
+        }
+        parts.push(`- **Estimated scope:** ${ia.estimatedScope}`);
+      }
+
+      if (context.registryBriefs && context.registryBriefs.length > 0) {
+        parts.push('');
+        parts.push('### File Map (from Code Registry — no need to Read these files)');
+        for (const brief of context.registryBriefs) {
+          parts.push(`**${brief.filePath}** (${brief.summary})`);
+          if (brief.highlights.length > 0) {
+            parts.push(`⚠️ ${brief.highlights.join(', ')}`);
+          }
+          if (brief.entities && brief.entities.length > 0) {
+            for (const e of brief.entities) {
+              const sig = e.signature ? ` — ${e.signature}` : '';
+              const flags: string[] = [];
+              if (e.status !== 'active') flags.push(e.status);
+              if (!e.hasTests) flags.push('no test');
+              const flagStr = flags.length ? ` [${flags.join(', ')}]` : '';
+              parts.push(`  ${e.kind} ${e.name}${sig}${flagStr}`);
+            }
+          }
+        }
+      }
+
+      parts.push('');
+      contextSection = parts.join('\n') + '\n';
+    }
+
     return `# Worker Agent
 
 ## Task
 - **Title:** ${taskTitle}
 - **Description:** ${taskDescription}
-${feedbackSection}
-## Instructions
-1. Perform the task and report results
-2. List all changed files
-3. Record all executed commands
-4. Note any uncertainties
-5. Consider code quality and tests
+${feedbackSection}${contextSection}
+## Rules
+- Search codebase thoroughly before concluding. Use Grep/Read — don't guess.
+- Verify changes compile before reporting success.
+- If uncertain, report clearly — don't implement workarounds.
+- No destructive commands (rm -rf, git reset --hard). No .env/.bashrc edits.
+- Before completing: verify all changed files exist, no syntax errors, confidence reflects reality.
 
-## Behavioral Rules (CRITICAL)
+## Tools available
+- \`cxt\` (code exploration toolkit, bundled with OpenSwarm):
+  - \`cxt check <file>\` — entity brief for a file (faster than Read for structural lookups).
+  - \`cxt check --search <q>\` — FTS5 search across the registry.
+  - \`cxt check --untested\` / \`--high-risk\` — surface risky spots before changing them.
+  - \`cxt bs\` — static bad-smell scan.
+  - Run \`cxt scan\` first if the registry seems stale; it's cheap.
+  - The \`File Map\` section above (when present) already comes from \`cxt\` — don't re-scan unless you need fresh data.
 
-### Early Stop Prevention
-- Do NOT conclude prematurely. Search the codebase thoroughly before deciding something doesn't exist.
-- If you need to find related code, use Grep/Read tools — don't guess.
-- Verify your changes compile and pass basic checks before reporting success.
-
-### DETOUR Prevention
-- If uncertain about the correct approach, DO NOT implement workarounds or "temporary fixes".
-- Report uncertainty clearly in output instead of guessing.
-- If requirements are ambiguous, report what is unclear rather than assuming.
-
-### Pre-Completion Checklist
-Before reporting success, verify:
-1. All changed files actually exist and are correct
-2. No obvious syntax errors in your changes
-3. Summary accurately describes what you did (not what you planned)
-4. If uncertain about anything, set confidencePercent below 60
-
-## Prohibited Actions (CRITICAL)
-- No destructive commands (rm -rf, git reset --hard, etc.)
-- No modifying environment config files (.env, .bashrc, etc.)
-- No system-level changes
-
-## Output Format (CRITICAL - must output in this format at the end)
-After completing the task, output results in the following JSON format:
-
+## Output (JSON, at the end)
 \`\`\`json
 {
   "success": true,
-  "summary": "Summary of work performed (1-2 sentences, do NOT copy reviewer feedback)",
-  "filesChanged": ["full path of files actually edited/written"],
-  "commands": ["list of bash commands executed"],
+  "summary": "What YOU did (1-2 sentences, not reviewer feedback)",
+  "filesChanged": ["full paths of files edited/written"],
+  "commands": ["bash commands executed"],
   "confidencePercent": 85
 }
 \`\`\`
-
-**IMPORTANT:**
-- **summary**: Describe what YOU did (e.g., "Added API response caching", "Optimized DB queries")
-  - Do NOT copy reviewer feedback
-  - Do NOT use generic titles like "Work completion summary"
-- **filesChanged**: **Full paths** of files actually changed via Edit/Write tools
-  - No empty arrays if files were changed
-  - Exclude read-only files
-- **commands**: Bash commands executed (npm run build, pytest, etc.)
-- **confidencePercent**: Your confidence in the result (0-100). Set below 60 if uncertain.
+Set confidencePercent below 60 if uncertain. filesChanged must include all edited files (full paths).
 
 `;
   },
@@ -200,7 +197,16 @@ After review, output results in the following JSON format:
     return lines.join('\n');
   },
 
-  buildPlannerPrompt({ taskTitle, taskDescription, projectName, targetMinutes, impactAnalysis }) {
+  buildPlannerPrompt({ taskTitle, taskDescription, projectName, targetMinutes, impactAnalysis, draftAnalysis }) {
+    const draftSection = draftAnalysis ? `
+## Pre-Analysis (Draft — by fast model)
+- **Task type:** ${draftAnalysis.taskType}
+- **Intent:** ${draftAnalysis.intentSummary}
+- **Suggested approach:** ${draftAnalysis.suggestedApproach}
+${draftAnalysis.relevantFiles.length > 0 ? `- **Likely files:** ${draftAnalysis.relevantFiles.join(', ')}` : ''}
+${draftAnalysis.projectStats ? `- **Project health:** ${draftAnalysis.projectStats}` : ''}
+` : '';
+
     const kgSection = impactAnalysis ? `
 ## Knowledge Graph — Affected Modules
 The following modules are identified by the Knowledge Graph as being affected by this task:
@@ -222,7 +228,7 @@ The following modules are identified by the Knowledge Graph as being affected by
 - **Title:** ${taskTitle}
 - **Description:** ${taskDescription}
 - **Project:** ${projectName}
-${kgSection}
+${draftSection}${kgSection}
 ## Your Mission
 Analyze this task and decompose it into units completable within ${targetMinutes} minutes.
 

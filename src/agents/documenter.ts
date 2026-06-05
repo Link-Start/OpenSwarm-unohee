@@ -220,7 +220,7 @@ function extractResultJson(text: string): DocumenterResult | null {
 /**
  * Normalize result
  */
-function normalizeResult(parsed: any): DocumenterResult {
+function normalizeResult(parsed: any): DocumenterResult { // eslint-disable-line @typescript-eslint/no-explicit-any -- JSON parse result
   return {
     success: Boolean(parsed.success),
     updatedFiles: Array.isArray(parsed.updatedFiles) ? parsed.updatedFiles : [],

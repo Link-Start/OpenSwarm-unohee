@@ -3,6 +3,12 @@
 # Copy this file to config.yaml to use
 
 # Default CLI adapter for worker/reviewer stages
+# Options: claude, codex, gpt, local, lmstudio
+# For GPT: run `openswarm auth login --provider gpt` first
+# For local: start Ollama, LMStudio, or llama.cpp server
+# For lmstudio: start LM Studio Local Server (default http://localhost:1234)
+#   Optional env: LMSTUDIO_BASE_URL, LMSTUDIO_MODEL, LMSTUDIO_API_KEY
+#   If LMSTUDIO_MODEL is unset, the adapter auto-selects the first loaded model.
 adapter: claude
 
 discord:
@@ -16,13 +22,13 @@ linear:
 
 github:
   repos:
-    - unohee/OpenSwarm  # owner/repo format
+    - owner/repo  # owner/repo format
   checkInterval: 300000  # 5 minutes (ms)
 
 # Agent list
 agents:
   - name: main
-    projectPath: ~/dev/OpenSwarm
+    projectPath: ~/dev/your-project
     heartbeatInterval: 1800000  # 30 minutes (ms)
     linearLabel: main  # Label for Linear issue filtering
     enabled: true
@@ -40,7 +46,7 @@ autonomous:
   maxConcurrentTasks: 4  # Number of concurrent tasks
 
   allowedProjects:
-    - ~/dev/OpenSwarm
+    - ~/dev/your-project
 
   # Task decomposition settings (Planner Agent)
   decomposition:
@@ -49,48 +55,73 @@ autonomous:
     plannerModel: claude-sonnet-4-20250514  # Planner model
 
   # Per-role settings
+  # Hybrid config: Claude for complex coding, local model for review/docs ($0)
   defaultRoles:
     worker:
       enabled: true
-      model: claude-haiku-4-5-20251001        # Default: Haiku (low cost)
-      escalateModel: claude-sonnet-4-20250514  # On failure: Sonnet
-      escalateAfterIteration: 3                # Escalate from 3rd iteration
+      adapter: claude
+      model: claude-sonnet-4-20250514         # Sonnet for coding tasks
+      escalateModel: claude-opus-4-6          # On failure: Opus
+      escalateAfterIteration: 3
       timeoutMs: 1800000  # 30 minutes
     reviewer:
       enabled: true
-      model: claude-haiku-4-5-20251001
-      timeoutMs: 600000   # 10 minutes
+      adapter: local                          # Local model — free, 7s response
+      model: gemma-4-e4b-it                   # Gemma 4 e4b via LMStudio
+      escalateModel: claude-sonnet-4-20250514 # Spot check: Sonnet reviews after N revisions
+      escalateAfterIteration: 3               # Escalate from 3rd iteration
+      timeoutMs: 60000    # 1 minute (local models are slower)
     tester:
       enabled: false
     documenter:
       enabled: false
+      adapter: local
+      model: gemma-4-e4b-it
+      timeoutMs: 120000   # 2 minutes
     auditor:
       enabled: false
-      model: claude-haiku-4-5-20251001
+      adapter: local
+      model: gemma-4-e4b-it
       timeoutMs: 300000   # 5 minutes
     skill-documenter:
       enabled: false
-      model: claude-haiku-4-5-20251001
+      adapter: local
+      model: gemma-4-e4b-it
       timeoutMs: 120000   # 2 minutes
+
+  # Pipeline guards
+  guards:
+    qualityGate: true
+    fakeDataGuard: true
+    conventionalCommits: true
+    branchValidation: true
+    uncertaintyDetection: true
+    registryCheck: true
+    bsDetector: true
 
   # Job profiles for lightweight vs heavy work
   jobProfiles:
     - name: quick-analysis
       maxMinutes: 15
       roles:
-        worker: claude-haiku-4-5-20251001
+        worker: claude-haiku-4-5-20251001     # Haiku for simple tasks
     - name: deep-engineering
       minMinutes: 16
       roles:
-        worker: claude-sonnet-4-20250514
-        reviewer: claude-sonnet-4-20250514
+        worker: claude-sonnet-4-20250514      # Sonnet for complex work
+        reviewer: claude-sonnet-4-20250514    # Sonnet reviews Sonnet
 
 # Long-running task monitoring (RunPod training, batch processing, etc.)
+#
+# checkCommand is a literal argv array — no shell is invoked, so pipes,
+# redirects, and substitutions do not work. Put shell logic in a script
+# you control and call that script instead (e.g. ["/opt/probe.sh", "arg"]).
+#
 # monitors:
 #   - id: runpod-training
 #     name: "LSTM model training"
 #     issueId: INT-456
-#     checkCommand: 'ssh runpod "tail -1 /workspace/train.log"'
+#     checkCommand: ["ssh", "runpod", "tail -1 /workspace/train.log"]
 #     completionCheck:
 #       type: output-regex
 #       successPattern: "Training finished"

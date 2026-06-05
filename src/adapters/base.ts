@@ -8,6 +8,7 @@ import fs from 'node:fs/promises';
 import type { CliAdapter, CliRunOptions, CliRunResult } from './types.js';
 import { parseCliStreamChunk } from '../agents/cliStreamParser.js';
 import { registerProcess } from './processRegistry.js';
+import { buildWorkerEnv } from './envPath.js';
 
 /**
  * Spawn a CLI process using the given adapter and options.
@@ -18,6 +19,11 @@ export async function spawnCli(
   adapter: CliAdapter,
   options: CliRunOptions,
 ): Promise<CliRunResult> {
+  // 어댑터가 직접 실행을 지원하면 shell spawn 대신 사용
+  if (adapter.run) {
+    return adapter.run(options);
+  }
+
   const promptFile = `/tmp/openswarm-prompt-${Date.now()}.txt`;
   await fs.writeFile(promptFile, options.prompt);
 
@@ -35,7 +41,10 @@ export async function spawnCli(
       const proc = spawn(cmd, {
         shell: true,
         cwd: options.cwd,
-        env: process.env,
+        // Inject OpenSwarm's bundled node_modules/.bin (gives workers access
+        // to `cxt` and other shipped CLIs) without touching the user's shell
+        // PATH or ~/.claude/ config.
+        env: buildWorkerEnv(process.env),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 

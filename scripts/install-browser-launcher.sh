@@ -3,7 +3,8 @@
 
 set -e
 
-PROJECT_DIR="/Users/unohee/dev/OpenSwarm"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PLIST_SOURCE="$PROJECT_DIR/scripts/com.intrect.openswarm.browser.plist"
 PLIST_TARGET="$HOME/Library/LaunchAgents/com.intrect.openswarm.browser.plist"
 
@@ -14,7 +15,9 @@ mkdir -p "$HOME/Library/LaunchAgents"
 
 # 2. plist 파일 복사
 echo "📋 plist 파일 복사: $PLIST_TARGET"
-cp "$PLIST_SOURCE" "$PLIST_TARGET"
+sed -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" \
+    -e "s|__HOME_DIR__|$HOME|g" \
+    "$PLIST_SOURCE" > "$PLIST_TARGET"
 
 # 3. 기존 설정 언로드 (있다면)
 if launchctl list | grep -q "com.intrect.openswarm.browser"; then

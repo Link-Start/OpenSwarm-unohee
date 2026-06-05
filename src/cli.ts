@@ -4,12 +4,17 @@
 // `openswarm run`, `openswarm init`, `openswarm validate`, `openswarm chat`, `openswarm start`
 
 import { Command } from 'commander';
-import { writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { runCli } from './runners/cliRunner.js';
 import { loadConfig, validateConfig, generateSampleConfig } from './core/config.js';
 
-const VERSION = '0.1.0';
+// Read version from package.json so it stays in sync with the published package.
+// cli.js lives at <pkg>/dist/cli.js, so package.json is one directory up.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as { version: string };
+const VERSION = pkg.version;
 
 const program = new Command();
 
@@ -161,10 +166,199 @@ program
 
 program
   .command('start')
-  .description('Start the full daemon (requires config.yaml with Discord + Linear)')
+  .description('Start the full daemon in the background (use --foreground to stay attached)')
+  .option('-F, --foreground', 'Run in the foreground instead of detaching (for debugging / LaunchAgent)')
+  .action(async (opts: { foreground?: boolean }) => {
+    if (opts.foreground) {
+      // Dynamic import triggers the top-level main() in index.ts
+      await import('./index.js');
+      return;
+    }
+
+    const { startDaemon } = await import('./cli/daemon.js');
+    try {
+      const { pid, logFile } = startDaemon();
+      console.log(`OpenSwarm started in background (pid ${pid}).`);
+      console.log(`  logs:    ${logFile}`);
+      console.log(`  stop:    openswarm stop`);
+      console.log(`  status:  openswarm status`);
+    } catch (err) {
+      console.error(`Failed to start: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+// openswarm stop
+
+program
+  .command('stop')
+  .description('Stop the background daemon (sends SIGTERM)')
+  .option('-t, --timeout <ms>', 'Max time to wait for graceful shutdown (default 10000)', '10000')
+  .action(async (opts: { timeout: string }) => {
+    const timeoutMs = parseInt(opts.timeout, 10);
+    const { stopDaemon } = await import('./cli/daemon.js');
+    try {
+      const stopped = await stopDaemon(Number.isFinite(timeoutMs) ? timeoutMs : 10_000);
+      if (!stopped) {
+        console.log('OpenSwarm is not running.');
+        return;
+      }
+      console.log('OpenSwarm stopped.');
+    } catch (err) {
+      console.error(`Failed to stop: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+// openswarm status
+
+program
+  .command('status')
+  .description('Report daemon status (pid, uptime, log path)')
   .action(async () => {
-    // Dynamic import triggers the top-level main() in index.ts
-    await import('./index.js');
+    const { getDaemonStatus } = await import('./cli/daemon.js');
+    const status = getDaemonStatus();
+    if (!status.running) {
+      console.log('OpenSwarm is not running.');
+      console.log(`  pid file: ${status.pidFile}`);
+      console.log(`  log file: ${status.logFile}`);
+      return;
+    }
+    const uptime = status.uptimeSeconds ?? 0;
+    const h = Math.floor(uptime / 3600);
+    const m = Math.floor((uptime % 3600) / 60);
+    const s = uptime % 60;
+    console.log(`OpenSwarm is running.`);
+    console.log(`  pid:    ${status.pid}`);
+    console.log(`  uptime: ${h}h ${m}m ${s}s`);
+    console.log(`  logs:   ${status.logFile}`);
+  });
+
+// openswarm dash
+
+program
+  .command('dash')
+  .description('Open the web dashboard in a browser')
+  .option('-p, --port <port>', 'Port number', '3847')
+  .option('--no-open', 'Start server without opening browser')
+  .action(async (opts: { port: string; open: boolean }) => {
+    const port = parseInt(opts.port, 10);
+    const { startWebServer } = await import('./support/web.js');
+    await startWebServer(port);
+    console.log(`Dashboard running at http://localhost:${port}`);
+
+    if (opts.open) {
+      const { exec } = await import('node:child_process');
+      const url = `http://localhost:${port}`;
+      const cmd = process.platform === 'darwin' ? `open "${url}"`
+        : process.platform === 'win32' ? `start "${url}"`
+        : `xdg-open "${url}"`;
+      exec(cmd, (err) => {
+        if (err) console.log(`Open ${url} in your browser`);
+      });
+    }
+
+    // Keep process alive
+    process.on('SIGINT', () => {
+      console.log('\nDashboard stopped.');
+      process.exit(0);
+    });
+  });
+
+// openswarm check
+
+program
+  .command('check')
+  .description('Check code registry for a file or show registry stats')
+  .argument('[filePath]', 'File path to inspect (relative to project root)')
+  .option('--stats', 'Show overall registry statistics')
+  .option('--deprecated', 'List all deprecated entities')
+  .option('--untested', 'List all untested entities')
+  .option('--high-risk', 'List all high-risk entities')
+  .option('--tag <tag>', 'List entities with a specific tag')
+  .option('--search <query>', 'Full-text search entities')
+  .option('--scan', 'Scan entire repository and sync to registry')
+  .option('--bs', 'Scan for BS patterns (bad code smells)')
+  .option('--tree', 'Display codebase tree with entity counts and risk')
+  .option('--ci', 'CI/CD mode: JSON output, exit 1 on critical issues')
+  .option('-v, --verbose', 'Verbose output (with --scan)')
+  .option('--project <id>', 'Filter by project ID')
+  .action(async (filePath: string | undefined, opts: {
+    stats?: boolean;
+    deprecated?: boolean;
+    untested?: boolean;
+    highRisk?: boolean;
+    tag?: string;
+    search?: string;
+    scan?: boolean;
+    bs?: boolean;
+    tree?: boolean;
+    ci?: boolean;
+    verbose?: boolean;
+    project?: string;
+  }) => {
+    const { handleCheck } = await import('./cli/checkHandler.js');
+    await handleCheck(filePath, opts);
+  });
+
+// openswarm check annotate <qualifiedName>
+
+const checkAnnotate = program
+  .command('annotate')
+  .description('Annotate a code entity in the registry')
+  .argument('<qualifiedName>', 'Entity qualified name (file::name) or search term')
+  .option('--deprecate [reason]', 'Mark as deprecated')
+  .option('--status <status>', 'Set status (active|experimental|planned|broken)')
+  .option('--tag <tag>', 'Add a tag (key or key=value)')
+  .option('--untag <tag>', 'Remove a tag')
+  .option('--note <text>', 'Add a note')
+  .option('--risk <level>', 'Set risk level (low|medium|high)')
+  .option('--warn <message>', 'Add a warning (format: severity/category: message)')
+  .action(async (qualifiedName: string, opts: {
+    deprecate?: string | boolean;
+    status?: string;
+    tag?: string;
+    untag?: string;
+    note?: string;
+    risk?: string;
+    warn?: string;
+  }) => {
+    const { handleAnnotate } = await import('./cli/checkHandler.js');
+    await handleAnnotate(qualifiedName, opts);
+  });
+
+// openswarm auth
+
+const authCmd = program
+  .command('auth')
+  .description('Manage OAuth authentication for providers');
+
+authCmd
+  .command('login')
+  .description('Login via OAuth (GPT)')
+  .option('--provider <provider>', 'Provider to authenticate', 'gpt')
+  .option('--client-id <clientId>', 'OAuth Client ID (or set OPENAI_CLIENT_ID env)')
+  .option('--port <port>', 'Callback server port', parseInt)
+  .action(async (opts: { provider: string; clientId?: string; port?: number }) => {
+    const { handleAuthLogin } = await import('./cli/authHandler.js');
+    await handleAuthLogin(opts.provider, opts);
+  });
+
+authCmd
+  .command('status')
+  .description('Show stored auth profiles')
+  .action(async () => {
+    const { handleAuthStatus } = await import('./cli/authHandler.js');
+    handleAuthStatus();
+  });
+
+authCmd
+  .command('logout')
+  .description('Remove stored auth tokens')
+  .option('--provider <provider>', 'Provider to remove', 'gpt')
+  .action(async (opts: { provider: string }) => {
+    const { handleAuthLogout } = await import('./cli/authHandler.js');
+    handleAuthLogout(opts.provider);
   });
 
 // 서브커맨드 없이 `openswarm`만 입력 시 → TUI chat 실행

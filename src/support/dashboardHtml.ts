@@ -552,6 +552,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <span class="hdr-fullname">: Vector-Encoded General Agent</span>
     <span class="hdr-sep">::</span>
     <span class="hdr-sub">SUPERVISOR</span>
+    <a href="/issues" style="color:var(--cyan);font-size:11px;text-decoration:none;margin-left:1rem;letter-spacing:0.1em;border:1px solid var(--cyan-dim);padding:2px 8px;border-radius:3px">ISSUES</a>
     <div class="hdr-right">
       <div class="svc-group">
         <span class="svc-status" id="svc-status">...</span>

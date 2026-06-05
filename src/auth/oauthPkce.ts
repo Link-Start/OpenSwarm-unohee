@@ -1,0 +1,270 @@
+// ============================================
+// OpenSwarm - OAuth 2.1 PKCE Flow
+// Browser-based OpenAI OAuth login
+// ============================================
+
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { randomBytes, createHash } from 'node:crypto';
+import { exec } from 'node:child_process';
+import { AuthProfileStore, type AuthProfile } from './oauthStore.js';
+
+// Constants
+
+const OPENAI_AUTH_ENDPOINT = 'https://auth.openai.com/oauth/authorize';
+const OPENAI_TOKEN_ENDPOINT = 'https://auth.openai.com/oauth/token';
+const DEFAULT_CALLBACK_PORT = 1455;
+const DEFAULT_SCOPES = 'openid profile email offline_access model.request';
+const LOGIN_TIMEOUT_MS = 120_000; // 2분
+const PROFILE_KEY = 'openai-gpt:default';
+
+// PKCE helpers
+
+function generateCodeVerifier(): string {
+  // 43-128자 base64url-safe 랜덤 문자열
+  return randomBytes(96).toString('base64url');
+}
+
+function generateCodeChallenge(verifier: string): string {
+  return createHash('sha256').update(verifier).digest('base64url');
+}
+
+function generateState(): string {
+  return randomBytes(32).toString('hex');
+}
+
+// Browser open (cross-platform)
+
+function openBrowser(url: string): void {
+  const platform = process.platform;
+  const cmd =
+    platform === 'darwin' ? 'open' :
+    platform === 'win32' ? 'start' :
+    'xdg-open';
+
+  exec(`${cmd} "${url}"`, (err) => {
+    if (err) {
+      console.error(`[Auth] 브라우저를 자동으로 열 수 없습니다. 직접 열어주세요:`);
+      console.error(url);
+    }
+  });
+}
+
+// OAuth flow result
+
+export interface OAuthFlowResult {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  accountId?: string;
+}
+
+export interface OAuthFlowOptions {
+  clientId: string;
+  port?: number;
+  scopes?: string;
+}
+
+/**
+ * OAuth 2.1 PKCE 흐름 실행.
+ * 로컬 HTTP 서버에서 callback을 받고, token을 교환하여 저장한다.
+ */
+export async function runOAuthPkceFlow(options: OAuthFlowOptions): Promise<OAuthFlowResult> {
+  const { clientId, port = DEFAULT_CALLBACK_PORT, scopes = DEFAULT_SCOPES } = options;
+  const redirectUri = `http://127.0.0.1:${port}/auth/callback`;
+
+  // 1. PKCE 생성
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = generateCodeChallenge(codeVerifier);
+  const state = generateState();
+
+  // 2. Authorization URL 구성
+  const authParams = new URLSearchParams({
+    response_type: 'code',
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+    scope: scopes,
+    state,
+  });
+  const authUrl = `${OPENAI_AUTH_ENDPOINT}?${authParams.toString()}`;
+
+  // 3. 로컬 HTTP 서버 시작 + callback 대기
+  return new Promise<OAuthFlowResult>((resolve, reject) => {
+    let settled = false;
+
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        server.close();
+        reject(new Error('OAuth login timed out (120s). 다시 시도하세요.'));
+      }
+    }, LOGIN_TIMEOUT_MS);
+
+    const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      if (settled) {
+        res.writeHead(400);
+        res.end();
+        return;
+      }
+
+      const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
+
+      if (url.pathname !== '/auth/callback') {
+        res.writeHead(404);
+        res.end('Not found');
+        return;
+      }
+
+      const code = url.searchParams.get('code');
+      const returnedState = url.searchParams.get('state');
+      const error = url.searchParams.get('error');
+
+      if (error) {
+        settled = true;
+        clearTimeout(timeout);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(errorHtml(error));
+        server.close();
+        reject(new Error(`OAuth error: ${error}`));
+        return;
+      }
+
+      if (!code || returnedState !== state) {
+        settled = true;
+        clearTimeout(timeout);
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(errorHtml('Invalid callback parameters'));
+        server.close();
+        reject(new Error('Invalid OAuth callback: missing code or state mismatch'));
+        return;
+      }
+
+      // 4. Token Exchange
+      try {
+        const tokenBody = new URLSearchParams({
+          grant_type: 'authorization_code',
+          code,
+          code_verifier: codeVerifier,
+          redirect_uri: redirectUri,
+          client_id: clientId,
+        });
+
+        const tokenRes = await fetch(OPENAI_TOKEN_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: tokenBody.toString(),
+        });
+
+        if (!tokenRes.ok) {
+          const errText = await tokenRes.text().catch(() => '');
+          throw new Error(`Token exchange failed (${tokenRes.status}): ${errText.slice(0, 300)}`);
+        }
+
+        const tokens = (await tokenRes.json()) as {
+          access_token: string;
+          refresh_token: string;
+          expires_in: number;
+          id_token?: string;
+        };
+
+        // id_token에서 accountId 추출 (JWT payload)
+        let accountId: string | undefined;
+        if (tokens.id_token) {
+          try {
+            const payload = JSON.parse(
+              Buffer.from(tokens.id_token.split('.')[1], 'base64url').toString(),
+            );
+            accountId = payload.sub;
+          } catch {
+            // id_token 파싱 실패는 무시
+          }
+        }
+
+        const result: OAuthFlowResult = {
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token,
+          expiresIn: tokens.expires_in,
+          accountId,
+        };
+
+        settled = true;
+        clearTimeout(timeout);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(successHtml());
+        server.close();
+        resolve(result);
+      } catch (err) {
+        settled = true;
+        clearTimeout(timeout);
+        res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(errorHtml(String(err)));
+        server.close();
+        reject(err);
+      }
+    });
+
+    server.listen(port, '127.0.0.1', () => {
+      console.log(`[Auth] Callback server listening on http://127.0.0.1:${port}`);
+      console.log(`[Auth] 브라우저에서 OpenAI 로그인 페이지를 엽니다...`);
+      openBrowser(authUrl);
+    });
+
+    server.on('error', (err) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        reject(new Error(`Callback server error: ${err.message}`));
+      }
+    });
+  });
+}
+
+/**
+ * OAuth 로그인 → 토큰 저장 (온보딩 전체 흐름)
+ */
+export async function loginAndSaveProfile(clientId: string, port?: number): Promise<void> {
+  const result = await runOAuthPkceFlow({ clientId, port });
+
+  const profile: AuthProfile = {
+    type: 'oauth',
+    provider: 'openai-gpt',
+    access: result.accessToken,
+    refresh: result.refreshToken,
+    expires: Date.now() + result.expiresIn * 1000,
+    clientId,
+    accountId: result.accountId,
+  };
+
+  const store = new AuthProfileStore();
+  store.setProfile(PROFILE_KEY, profile);
+
+  console.log(`[Auth] GPT OAuth 인증 완료. 프로필 저장됨: ${PROFILE_KEY}`);
+  if (result.accountId) {
+    console.log(`[Auth] Account ID: ${result.accountId}`);
+  }
+}
+
+// HTML templates
+
+function successHtml(): string {
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>OpenSwarm Auth</title>
+<style>body{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#f0fdf4}
+.card{text-align:center;padding:2rem;border-radius:12px;background:white;box-shadow:0 2px 8px rgba(0,0,0,0.1)}
+h1{color:#16a34a;margin-bottom:0.5rem}p{color:#666}</style></head>
+<body><div class="card"><h1>✓ 인증 완료</h1><p>OpenSwarm에 GPT OAuth 인증이 완료되었습니다.<br>이 창을 닫아도 됩니다.</p></div></body></html>`;
+}
+
+function errorHtml(error: string): string {
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>OpenSwarm Auth Error</title>
+<style>body{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#fef2f2}
+.card{text-align:center;padding:2rem;border-radius:12px;background:white;box-shadow:0 2px 8px rgba(0,0,0,0.1)}
+h1{color:#dc2626;margin-bottom:0.5rem}p{color:#666}code{background:#f3f4f6;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.9rem}</style></head>
+<body><div class="card"><h1>✗ 인증 실패</h1><p>${escapeHtml(error)}</p><p>터미널에서 다시 시도하세요.</p></div></body></html>`;
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}

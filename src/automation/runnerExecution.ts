@@ -17,6 +17,7 @@ import * as projectMapper from '../support/projectMapper.js';
 import * as linear from '../linear/index.js';
 import * as planner from '../support/planner.js';
 import { analyzeIssue } from '../knowledge/index.js';
+import { runDraftAnalysis, type DraftAnalysis } from '../agents/draftAnalyzer.js';
 import { t } from '../locale/index.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import {
@@ -117,6 +118,10 @@ export async function fetchLinearTasks(): Promise<{ tasks: TaskItem[]; error?: s
 
 export interface ExecutionContext {
   allowedProjects: string[];
+  /** Draft analyzer 모델 (기본: claude-haiku-4-5-20251001) */
+  draftModel?: string;
+  /** Draft analyzer 활성화 (기본: true) */
+  enableDraftAnalysis?: boolean;
   plannerModel?: string;
   plannerTimeoutMs?: number;
   pairMaxAttempts?: number;
@@ -229,6 +234,7 @@ export async function decomposeTask(
   task: TaskItem,
   projectPath: string,
   targetMinutes: number,
+  draftAnalysis?: DraftAnalysis,
 ): Promise<boolean | 'no-decomp'> {
   console.log(`[AutonomousRunner] Decomposing task: ${task.title}`);
 
@@ -311,8 +317,9 @@ export async function decomposeTask(
     broadcastEvent({ type: 'log', data: { taskId, stage: 'decompose', line: `⏱ Planner running... ${elapsed}s` } });
   }, 30000);
 
-  // KG 영향 분석 — 플래너에 파일 분리 힌트 제공
-  const impactAnalysis = await analyzeIssue(projectPath, task.title, task.description).catch(() => null);
+  // KG 영향 분석 — Draft가 이미 가지고 있으면 재사용
+  const impactAnalysis = draftAnalysis?.impactAnalysis
+    ?? await analyzeIssue(projectPath, task.title, task.description).catch(() => null);
 
   let result: Awaited<ReturnType<typeof planner.runPlanner>>;
   try {
@@ -326,6 +333,13 @@ export async function decomposeTask(
       timeoutMs: ctx.plannerTimeoutMs ?? 600000,
       onLog: (line: string) => broadcastEvent({ type: 'log', data: { taskId, stage: 'decompose', line } }),
       impactAnalysis: impactAnalysis ?? undefined,
+      draftAnalysis: draftAnalysis ? {
+        taskType: draftAnalysis.taskType,
+        intentSummary: draftAnalysis.intentSummary,
+        relevantFiles: draftAnalysis.relevantFiles,
+        suggestedApproach: draftAnalysis.suggestedApproach,
+        projectStats: draftAnalysis.projectStats,
+      } : undefined,
     });
   } finally {
     clearInterval(progressTimer);
@@ -508,6 +522,32 @@ export async function executePipeline(
 ): Promise<PipelineResult> {
   console.log(`[AutonomousRunner] executePipeline: ${task.title}`);
 
+  // ============================================
+  // Draft Analysis (Haiku 사전 분석 — ~3초)
+  // Planner + Worker에 enriched context 제공
+  // ============================================
+  let draftResult: DraftAnalysis | undefined;
+  if (ctx.enableDraftAnalysis !== false) {
+    try {
+      const taskId = task.issueIdentifier || task.issueId || task.id;
+      broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'draft', status: 'start' } });
+
+      draftResult = await runDraftAnalysis({
+        taskTitle: task.title,
+        taskDescription: task.description || '',
+        projectPath,
+        model: ctx.draftModel,
+        timeoutMs: 30000,
+        onLog: (line) => broadcastEvent({ type: 'log', data: { taskId, stage: 'draft', line } }),
+      });
+
+      broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'draft', status: 'complete' } });
+      console.log(`[AutonomousRunner] Draft: type=${draftResult.taskType}, files=${draftResult.relevantFiles.length}, ${draftResult.durationMs}ms`);
+    } catch (err) {
+      console.warn('[AutonomousRunner] Draft analysis failed (non-blocking):', err);
+    }
+  }
+
   if (ctx.enableDecomposition) {
     const threshold = ctx.decompositionThresholdMinutes ?? 30;
     const needsDecomp = planner.needsDecomposition(task, threshold, true); // heuristic pre-filter
@@ -516,7 +556,7 @@ export async function executePipeline(
       const estimated = planner.estimateTaskDuration(task);
       console.log(`[AutonomousRunner] Task "${task.title}" may need decomposition (estimated ${estimated}min > ${threshold}min)`);
 
-      const decomposed = await decomposeTask(ctx, task, projectPath, threshold);
+      const decomposed = await decomposeTask(ctx, task, projectPath, threshold, draftResult);
       if (decomposed === true) {
         // Successfully decomposed into sub-issues
         return {
@@ -565,7 +605,21 @@ export async function executePipeline(
 
   try {
     const roles = ctx.getRolesForProject(projectPath); // look up config using original path
-    const pipeline = createPipelineFromConfig(roles, ctx.pairMaxAttempts ?? 3, ctx.guards, ctx.jobProfiles);
+    const pipeline = createPipelineFromConfig(
+      roles,
+      ctx.pairMaxAttempts ?? 3,
+      ctx.guards,
+      ctx.jobProfiles,
+      draftResult ? {
+        taskType: draftResult.taskType,
+        intentSummary: draftResult.intentSummary,
+        relevantFiles: draftResult.relevantFiles,
+        suggestedApproach: draftResult.suggestedApproach,
+        projectStats: draftResult.projectStats,
+        impactAnalysis: draftResult.impactAnalysis,
+        registrySnapshot: draftResult.registrySnapshot,
+      } : undefined,
+    );
 
     const taskPrefix = buildTaskPrefix(task, actualPath);
 

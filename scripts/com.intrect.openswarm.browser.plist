@@ -6,26 +6,24 @@
     <key>Label</key>
     <string>com.intrect.openswarm.browser</string>
 
-    <!-- Command to open browser (with delay) -->
+    <!-- Command to open browser -->
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/unohee/dev/OpenSwarm/scripts/open-browser-once.sh</string>
+        <string>__PROJECT_DIR__/scripts/open-browser-once.sh</string>
     </array>
 
-    <!-- Run on load (system boot) - ONCE only -->
+    <!-- Run on load - once only -->
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- Don't keep alive - run once and exit -->
     <key>KeepAlive</key>
     <false/>
 
-    <!-- Standard output (optional, for debugging) -->
     <key>StandardOutPath</key>
-    <string>/Users/unohee/.openswarm/logs/browser.log</string>
+    <string>__HOME_DIR__/.openswarm/logs/browser.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/unohee/.openswarm/logs/browser-error.log</string>
+    <string>__HOME_DIR__/.openswarm/logs/browser-error.log</string>
 </dict>
 </plist>

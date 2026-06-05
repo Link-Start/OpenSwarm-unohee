@@ -36,9 +36,9 @@ services:
       - openswarm-data:/app/data:rw
       # Config file (if exists)
       - ./config.yaml:/app/config.yaml:ro
-      # Claude CLI auth and git config
-      - ~/.claude:/home/claude/.claude:ro
-      - ~/.gitconfig:/home/claude/.gitconfig:ro
+      # Claude CLI auth and git config (uncomment and configure as needed)
+      # - ~/.claude:/home/claude/.claude:ro
+      # - ~/.gitconfig:/home/claude/.gitconfig:ro
 
     # Resource limits
     deploy:

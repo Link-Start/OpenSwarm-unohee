@@ -3,7 +3,7 @@
 // ============================================
 
 import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import YAML from 'yaml';
@@ -12,15 +12,35 @@ import { setTimeWindowConfig, DEFAULT_TIME_WINDOW } from '../support/timeWindow.
 
 // Constants
 
-const CONFIG_PATHS = [
-  join(process.cwd(), 'config.yaml'),
-  join(process.cwd(), 'config.yml'),
-  join(process.cwd(), 'config.json'),
-];
+const CONFIG_FILENAMES = ['config.yaml', 'config.yml', 'config.json'] as const;
+
+// Directories searched for config, in priority order.
+// 1. $OPENSWARM_CONFIG — explicit file path (highest priority, handled separately).
+// 2. process.cwd() — project-local overrides (existing behavior).
+// 3. ~/.config/openswarm — XDG-style user config (preferred daemon location).
+// 4. ~/.openswarm — legacy home fallback.
+function getConfigSearchDirs(): string[] {
+  const home = homedir();
+  return [
+    process.cwd(),
+    join(home, '.config', 'openswarm'),
+    join(home, '.openswarm'),
+  ];
+}
+
+function getConfigSearchPaths(): string[] {
+  const paths: string[] = [];
+  for (const dir of getConfigSearchDirs()) {
+    for (const name of CONFIG_FILENAMES) {
+      paths.push(join(dir, name));
+    }
+  }
+  return paths;
+}
 
 const DEFAULT_HEARTBEAT_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_GITHUB_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
-const AdapterNameSchema = z.enum(['claude', 'codex']);
+const AdapterNameSchema = z.enum(['claude', 'codex', 'gpt', 'local', 'lmstudio']);
 
 // Zod Schemas
 
@@ -37,12 +57,12 @@ const DiscordConfigSchema = z.object({
   token: z.string().min(1, 'Discord token is required'),
   channelId: z.string().min(1, 'Discord channel ID is required'),
   webhookUrl: z.string().optional(),
-});
+}).optional();
 
 const LinearConfigSchema = z.object({
   apiKey: z.string().min(1, 'Linear API key is required'),
   teamId: z.string().min(1, 'Linear team ID is required'),
-});
+}).optional();
 
 const GitHubConfigSchema = z.object({
   repos: z.array(z.string()).default([]),
@@ -215,7 +235,7 @@ const CompletionCheckSchema = z.discriminatedUnion('type', [
 const LongRunningMonitorConfigSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
-  checkCommand: z.string().min(1),
+  checkCommand: z.array(z.string().min(1)).min(1),
   completionCheck: CompletionCheckSchema,
   issueId: z.string().optional(),
   checkInterval: z.number().min(1).default(1),
@@ -321,7 +341,6 @@ export function expandPath(path: string, resolveRelative = false): string {
     return join(homedir(), path.slice(2));
   }
   if (resolveRelative) {
-    const { resolve } = require('node:path') as typeof import('node:path');
     return resolve(path);
   }
   return path;
@@ -330,10 +349,25 @@ export function expandPath(path: string, resolveRelative = false): string {
 // Config Loading
 
 /**
- * Find configuration file
+ * Find configuration file.
+ *
+ * Resolution order:
+ *   1. $OPENSWARM_CONFIG env var (explicit file path override)
+ *   2. ./config.{yaml,yml,json}           (project-local)
+ *   3. ~/.config/openswarm/config.{…}     (XDG user config)
+ *   4. ~/.openswarm/config.{…}            (legacy home fallback)
  */
 function findConfigFile(): string | null {
-  for (const path of CONFIG_PATHS) {
+  const envOverride = process.env.OPENSWARM_CONFIG;
+  if (envOverride && envOverride.length > 0) {
+    if (existsSync(envOverride)) {
+      return envOverride;
+    }
+    // Surface a clear error rather than silently falling through — user asked for this file.
+    throw new Error(`OPENSWARM_CONFIG points to a file that does not exist: ${envOverride}`);
+  }
+
+  for (const path of getConfigSearchPaths()) {
     if (existsSync(path)) {
       return path;
     }
@@ -362,11 +396,11 @@ function transformConfig(raw: RawConfig): SwarmConfig {
   return {
     adapter: raw.adapter,
     language: raw.language,
-    discordToken: raw.discord.token,
-    discordChannelId: raw.discord.channelId,
-    discordWebhookUrl: raw.discord.webhookUrl,
-    linearApiKey: raw.linear.apiKey,
-    linearTeamId: raw.linear.teamId,
+    discordToken: raw.discord?.token ?? '',
+    discordChannelId: raw.discord?.channelId ?? '',
+    discordWebhookUrl: raw.discord?.webhookUrl,
+    linearApiKey: raw.linear?.apiKey ?? '',
+    linearTeamId: raw.linear?.teamId ?? '',
     agents: raw.agents.map(agent => ({
       ...agent,
       projectPath: expandPath(agent.projectPath),
@@ -449,8 +483,10 @@ export function loadConfig(customPath?: string): SwarmConfig {
   const configPath = customPath ?? findConfigFile();
 
   if (!configPath) {
+    const searched = getConfigSearchPaths().map((p) => `  - ${p}`).join('\n');
     throw new Error(
-      `Config file not found. Create one of: ${CONFIG_PATHS.join(', ')}`
+      `Config file not found. Searched:\n${searched}\n` +
+      `Create one of the above, or set $OPENSWARM_CONFIG to an explicit file path.`
     );
   }
 
@@ -465,7 +501,19 @@ export function loadConfig(customPath?: string): SwarmConfig {
   }
 
   // 3. Substitute environment variables
-  const substituted = substituteEnvVarsDeep(rawData);
+  const substituted = substituteEnvVarsDeep(rawData) as Record<string, unknown>;
+
+  // 3.5. Optional 블록 정리: 환경변수 미설정 시 빈 문자열이 들어온 블록 제거
+  const discordBlock = substituted.discord as Record<string, unknown> | undefined;
+  if (discordBlock && (!discordBlock.token || !discordBlock.channelId)) {
+    console.log('[Config] Discord credentials not set — disabling Discord integration');
+    delete substituted.discord;
+  }
+  const linearBlock = substituted.linear as Record<string, unknown> | undefined;
+  if (linearBlock && (!linearBlock.apiKey || !linearBlock.teamId)) {
+    console.log('[Config] Linear credentials not set — disabling Linear integration');
+    delete substituted.linear;
+  }
 
   // 4. Zod schema validation
   const parseResult = RawConfigSchema.safeParse(substituted);
@@ -543,6 +591,10 @@ export function generateSampleConfig(): string {
 # Environment variables use \${VAR_NAME} or \${VAR_NAME:-default} format
 
 # Default CLI adapter for worker/reviewer stages
+# Options: claude, codex, gpt, local, lmstudio
+# For GPT: run \`openswarm auth login --provider gpt\` first
+# For LM Studio: start Local Server and set LMSTUDIO_BASE_URL/LMSTUDIO_MODEL if needed
+#   If LMSTUDIO_MODEL is unset, the lmstudio adapter auto-selects the first loaded model.
 adapter: claude
 
 discord:

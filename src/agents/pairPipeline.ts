@@ -17,7 +17,9 @@ import { broadcastEvent } from '../core/eventHub.js';
 import { CONFIDENCE_THRESHOLDS } from './agentPair.js';
 import * as agentPair from './agentPair.js';
 import { runGuards, type GuardsRunResult } from './pipelineGuards.js';
-import { hasRepoSnapshot, scanAndCache } from '../knowledge/index.js';
+import { hasRepoSnapshot, scanAndCache, analyzeIssue } from '../knowledge/index.js';
+import { getRegistryStore } from '../registry/sqliteStore.js';
+import type { WorkerContext } from '../locale/types.js';
 import * as workerAgent from './worker.js';
 import * as reviewerAgent from './reviewer.js';
 import * as testerAgent from './tester.js';
@@ -56,6 +58,16 @@ export interface PipelineConfig {
   skipAuditorUnderFileCount?: number;
   /** Enable verbose logging (detailed stage info, agent decisions, timing) */
   verbose?: boolean;
+  /** Draft Analyzer 사전 분석 결과 (Haiku) — Worker/Planner에 주입 */
+  draftAnalysis?: {
+    taskType: string;
+    intentSummary: string;
+    relevantFiles: string[];
+    suggestedApproach: string;
+    projectStats?: string;
+    impactAnalysis?: import('../knowledge/types.js').ImpactAnalysis;
+    registrySnapshot?: Array<{ filePath: string; summary: string; highlights: string[] }>;
+  };
 }
 
 export interface StageResult {
@@ -288,7 +300,7 @@ export class PairPipeline extends EventEmitter {
       return this.buildResult(context, stages, startTime);
 
     } catch (error) {
-      console.error(`[${context.taskPrefix}] Error:`, error);
+      console.error('[%s] Error:', context.taskPrefix, error);
       agentPair.updateSessionStatus(session.id, 'failed');
       return {
         success: false,
@@ -314,6 +326,99 @@ export class PairPipeline extends EventEmitter {
   // ============================================
   // Stage Execution
   // ============================================
+
+  /**
+   * Worker에 주입할 코드 컨텍스트 수집
+   * Draft 분석이 있으면 재사용, 없으면 직접 수집
+   */
+  private async collectWorkerContext(context: PipelineContext): Promise<WorkerContext | undefined> {
+    try {
+      const wc: WorkerContext = {};
+      const draft = this.config.draftAnalysis;
+
+      // Draft 분석 결과가 있으면 우선 사용 (중복 API 호출 방지)
+      if (draft) {
+        wc.draftAnalysis = {
+          taskType: draft.taskType,
+          intentSummary: draft.intentSummary,
+          relevantFiles: draft.relevantFiles,
+          suggestedApproach: draft.suggestedApproach,
+          projectStats: draft.projectStats,
+        };
+
+        if (draft.impactAnalysis) {
+          wc.impactAnalysis = draft.impactAnalysis;
+        }
+        if (draft.registrySnapshot && draft.registrySnapshot.length > 0) {
+          wc.registryBriefs = draft.registrySnapshot;
+        }
+      }
+
+      // Draft에 impactAnalysis가 없으면 직접 수집
+      if (!wc.impactAnalysis) {
+        const impact = await analyzeIssue(
+          context.projectPath,
+          context.task.title,
+          context.task.description || '',
+        );
+        if (impact && (impact.directModules.length > 0 || impact.dependentModules.length > 0)) {
+          wc.impactAnalysis = impact;
+        }
+      }
+
+      // Draft에 registryBriefs가 없으면 직접 수집
+      if (!wc.registryBriefs) {
+        const affectedFiles = new Set<string>();
+        if (wc.impactAnalysis) {
+          for (const mod of wc.impactAnalysis.directModules) affectedFiles.add(mod);
+          for (const mod of wc.impactAnalysis.dependentModules.slice(0, 5)) affectedFiles.add(mod);
+        }
+
+        if (affectedFiles.size > 0) {
+          try {
+            const store = getRegistryStore();
+            const briefs: WorkerContext['registryBriefs'] = [];
+
+            for (const filePath of affectedFiles) {
+              const brief = store.fileBrief(filePath);
+              if (brief.entities.length === 0) continue;
+
+              const highlights: string[] = [];
+              for (const e of brief.entities) {
+                if (e.status === 'deprecated') highlights.push(`${e.name} (deprecated)`);
+                else if (e.status === 'broken') highlights.push(`${e.name} (broken)`);
+                const critical = e.warnings.filter(w => !w.resolved && w.severity === 'critical');
+                if (critical.length > 0) highlights.push(`${e.name} (${critical.length} critical)`);
+              }
+
+              // entity 목록 — Worker가 파일을 읽지 않고 구조 파악 (상위 15개)
+              const entities = brief.entities.slice(0, 15).map(e => ({
+                kind: e.kind,
+                name: e.name,
+                signature: e.signature?.slice(0, 80),
+                status: e.status,
+                hasTests: e.hasTests,
+              }));
+
+              briefs.push({ filePath: brief.filePath, summary: brief.summary, highlights, entities });
+            }
+
+            if (briefs.length > 0) {
+              wc.registryBriefs = briefs;
+            }
+          } catch {
+            // Registry 미초기화
+          }
+        }
+      }
+
+      if (!wc.impactAnalysis && !wc.registryBriefs && !wc.draftAnalysis) return undefined;
+      return wc;
+    } catch (err) {
+      console.warn('[Pipeline] Worker context collection failed (non-blocking):', err);
+      return undefined;
+    }
+  }
 
   /**
    * Check if a stage is enabled
@@ -359,6 +464,15 @@ export class PairPipeline extends EventEmitter {
             onLog('🔄 Using fresh context (previous attempts failed)');
           }
 
+          // 코드 컨텍스트 수집 (첫 시도 정확도 향상 목적)
+          const workerContext = await this.collectWorkerContext(context);
+          if (workerContext && this.config.verbose) {
+            const modCount = (workerContext.impactAnalysis?.directModules.length ?? 0)
+              + (workerContext.impactAnalysis?.dependentModules.length ?? 0);
+            const briefCount = workerContext.registryBriefs?.length ?? 0;
+            this.emit('log', { line: `[verbose] Worker context: ${modCount} affected modules, ${briefCount} file briefs` });
+          }
+
           result = await workerAgent.runWorker({
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
@@ -376,6 +490,7 @@ export class PairPipeline extends EventEmitter {
             projectName: context.task.linearProject?.name,
             onLog,
             processContext: { taskId: context.task.id, stage: 'worker' },
+            workerContext,
           });
           agentPair.saveWorkerResult(context.session.id, result as WorkerResult);
           context.workerResult = result as WorkerResult;
@@ -667,19 +782,20 @@ export class PairPipeline extends EventEmitter {
       // ========== WORKER (with escalation) ==========
       const workerCfg = this.config.roles?.worker;
       const escalateThreshold = workerCfg?.escalateAfterIteration ?? 3;
-      const shouldEscalate = context.currentIteration >= escalateThreshold && !!workerCfg?.escalateModel;
+      const escalateModel = workerCfg?.escalateModel;
+      const shouldEscalate = context.currentIteration >= escalateThreshold && !!escalateModel;
       const baseWorkerModel = this.getModelForRole('worker', context.task);
       const workerOverrides = shouldEscalate
-        ? { model: workerCfg!.escalateModel! }
+        ? { model: escalateModel }
         : (baseWorkerModel ? { model: baseWorkerModel } : undefined);
 
-      if (shouldEscalate) {
-        console.log(`[${context.taskPrefix}] Escalating worker model → ${workerCfg!.escalateModel} (iteration ${context.currentIteration})`);
+      if (shouldEscalate && escalateModel) {
+        console.log(`[${context.taskPrefix}] Escalating worker model → ${escalateModel} (iteration ${context.currentIteration})`);
         broadcastEvent({ type: 'pipeline:escalation', data: {
           taskId: context.task.id,
           iteration: context.currentIteration,
           fromModel: workerCfg?.model,
-          toModel: workerCfg!.escalateModel!,
+          toModel: escalateModel,
         } });
       }
 
@@ -783,7 +899,25 @@ export class PairPipeline extends EventEmitter {
       // ========== REVIEWER ==========
       if (hasReviewer) {
         agentPair.updateSessionStatus(context.session.id, 'reviewing');
-        const reviewerResult = await this.runStage('reviewer', context);
+
+        // Reviewer escalation: 로컬 모델이 N회 이상 REVISE → 상위 모델로 spot check
+        const reviewerCfg = this.config.roles?.reviewer;
+        const reviewerEscalateModel = reviewerCfg?.escalateModel;
+        const reviewerEscalateThreshold = reviewerCfg?.escalateAfterIteration ?? 3;
+        const shouldEscalateReviewer = context.currentIteration >= reviewerEscalateThreshold && !!reviewerEscalateModel;
+
+        const reviewerOverrides = shouldEscalateReviewer
+          ? { model: reviewerEscalateModel }
+          : undefined;
+
+        if (shouldEscalateReviewer && reviewerEscalateModel) {
+          console.log(`[${context.taskPrefix}] Reviewer escalation → ${reviewerEscalateModel} (iteration ${context.currentIteration})`);
+          this.emit('log', {
+            line: `🔍 Reviewer spot check: escalating to ${reviewerEscalateModel}`,
+          });
+        }
+
+        const reviewerResult = await this.runStage('reviewer', context, reviewerOverrides);
         stages.push(reviewerResult);
 
         const decision = (reviewerResult.result as ReviewResult).decision;
@@ -975,6 +1109,7 @@ export function createPipelineFromConfig(
   maxIterations = 3,
   guards?: Partial<PipelineGuardsConfig>,
   jobProfiles?: JobProfile[],
+  draftAnalysis?: PipelineConfig['draftAnalysis'],
 ): PairPipeline {
   const stages: PipelineStage[] = [];
 
@@ -1003,6 +1138,7 @@ export function createPipelineFromConfig(
     roles,
     guards,
     jobProfiles,
+    draftAnalysis,
   });
 }
 

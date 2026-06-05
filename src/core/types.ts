@@ -92,7 +92,7 @@ export type SwarmEvent = {
  */
 export type SwarmConfig = {
   /** Default CLI adapter */
-  adapter?: 'claude' | 'codex';
+  adapter?: 'claude' | 'codex' | 'gpt' | 'local' | 'lmstudio';
   /** UI language: 'en' | 'ko' (default: 'en') */
   language: 'en' | 'ko';
   /** Discord bot token */
@@ -256,7 +256,7 @@ export type RoleConfig = {
   /** Whether role is enabled */
   enabled: boolean;
   /** CLI adapter name */
-  adapter?: 'claude' | 'codex';
+  adapter?: 'claude' | 'codex' | 'gpt' | 'local' | 'lmstudio';
   /** Model ID */
   model: string;
   /** Timeout (ms), 0 = unlimited */
@@ -350,8 +350,12 @@ export type CompletionCheck =
 export type LongRunningMonitorConfig = {
   id: string;
   name: string;
-  /** Bash command for status check */
-  checkCommand: string;
+  /**
+   * Argv-style command for status check. Executed via `execFile` without a
+   * shell — no pipes, redirects, or substitutions. If you need shell
+   * semantics, invoke a script you control: `["/opt/myprobe.sh", "arg"]`.
+   */
+  checkCommand: string[];
   completionCheck: CompletionCheck;
   /** Linear issue ID (comments on state change) */
   issueId?: string;
@@ -388,6 +392,8 @@ export interface PipelineGuardsConfig {
   branchValidation: boolean;
   uncertaintyDetection: boolean;
   haltToLinear: boolean;
+  registryCheck: boolean;
+  bsDetector: boolean;
 }
 
 export type AutonomousStartupConfig = {

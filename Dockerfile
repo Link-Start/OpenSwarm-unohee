@@ -76,8 +76,8 @@ RUN npm ci --omit=dev --include=optional && \
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
 
-# Copy configuration (use config.yaml from project root)
-COPY config.yaml ./config.yaml
+# Copy example config (actual config.yaml should be mounted as volume)
+COPY config.example.yaml ./config.example.yaml
 
 # Create necessary directories and set permissions
 RUN mkdir -p /app/config /app/logs /app/data /home/claude/dev && \

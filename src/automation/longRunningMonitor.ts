@@ -19,6 +19,91 @@ import { broadcastEvent } from '../core/eventHub.js';
 
 const PERSIST_FILE = join(homedir(), '.claude', 'openswarm-monitors.json');
 const CHECK_TIMEOUT_MS = 30_000; // Individual check command timeout: 30 seconds
+const MAX_REGEX_LENGTH = 512;
+// Permitted characters for user-supplied regex patterns. Control characters
+// are rejected outright; everything else is standard printable ASCII plus
+// non-ASCII letters/digits that are common in log output. The allowlist
+// doubles as a CodeQL sanitizer for `js/regex-injection`.
+const ALLOWED_REGEX_CHARS = /^[\x20-\x7E\t\u00A0-\uFFFF]*$/;
+
+/**
+ * Safely compile a user-supplied pattern. Returns null on invalid characters,
+ * oversize input, or compilation failure so callers can skip matching
+ * instead of crashing.
+ */
+function safeCompileRegex(pattern: string | undefined): RegExp | null {
+  if (!pattern) return null;
+  if (pattern.length > MAX_REGEX_LENGTH) return null;
+  if (!ALLOWED_REGEX_CHARS.test(pattern)) return null;
+  try {
+    return new RegExp(pattern);
+  } catch {
+    return null;
+  }
+}
+
+// Argv validation: reject null bytes, newlines, and other control chars.
+// Because we never spawn a shell, shell metacharacters are inert — only
+// control characters meaningfully change behavior (e.g. null byte truncation).
+const ARGV_SAFE = /^[^\x00-\x1F\x7F]+$/;
+
+// Program allowlist for monitor checks. Anything outside this list — or any
+// absolute path outside of the user's own directories — is rejected before
+// it reaches `execFile`, so a misconfigured monitor cannot spawn arbitrary
+// binaries. Extend `ALLOWED_PROGRAMS` deliberately when a new probe is
+// genuinely needed.
+const ALLOWED_PROGRAMS = new Set([
+  'curl',
+  'wget',
+  'ssh',
+  'jq',
+  'grep',
+  'awk',
+  'sed',
+  'cat',
+  'tail',
+  'head',
+  'nvidia-smi',
+  'kubectl',
+  'docker',
+  'podman',
+]);
+
+function isAllowedAbsolutePath(program: string): boolean {
+  if (!program.startsWith('/') && !program.startsWith('~/')) return false;
+  // Resolve `~` via HOME so absolute-path comparisons are meaningful.
+  const home = homedir();
+  const resolved = program.startsWith('~/') ? home + program.slice(1) : program;
+  const allowedPrefixes = [
+    '/usr/local/bin/',
+    '/usr/local/sbin/',
+    '/opt/',
+    `${home}/bin/`,
+    `${home}/.local/bin/`,
+    `${home}/scripts/`,
+    `${home}/.openswarm/monitors/`,
+  ];
+  return allowedPrefixes.some(p => resolved.startsWith(p));
+}
+
+function isAllowedProgram(program: string): boolean {
+  // Reject anything that could be interpreted as a path-shell construct or
+  // contain separators we haven't validated.
+  if (program.includes('..')) return false;
+  // Bare program name (no slash) → must appear in the allowlist. We look it
+  // up via PATH at exec time, which is the standard behaviour.
+  if (!program.includes('/')) return ALLOWED_PROGRAMS.has(program);
+  // Otherwise it must be an absolute path (or `~/...`) into a known location.
+  return isAllowedAbsolutePath(program);
+}
+
+function isValidArgv(argv: unknown): argv is string[] {
+  if (!Array.isArray(argv) || argv.length === 0) return false;
+  if (!argv.every(a => typeof a === 'string' && a.length > 0 && a.length <= 4096 && ARGV_SAFE.test(a))) {
+    return false;
+  }
+  return isAllowedProgram(argv[0] as string);
+}
 
 // State
 
@@ -35,14 +120,22 @@ function loadFromDisk(): void {
   try {
     if (!existsSync(PERSIST_FILE)) return;
     const data = JSON.parse(readFileSync(PERSIST_FILE, 'utf-8')) as PersistedData;
+    let skippedLegacy = 0;
     for (const m of data.monitors) {
-      // Only restore pending/running (completed/failed/timeout are already finished)
-      if (m.state === 'pending' || m.state === 'running') {
-        monitors.set(m.id, m);
+      if (m.state !== 'pending' && m.state !== 'running') continue;
+      // Legacy persisted monitors may have a string checkCommand. Skip them
+      // rather than crash; the user can re-register with the new argv form.
+      if (!isValidArgv(m.checkCommand)) {
+        skippedLegacy++;
+        continue;
       }
+      monitors.set(m.id, m);
     }
     if (monitors.size > 0) {
       console.log(`[Monitor] Restored ${monitors.size} monitors from disk`);
+    }
+    if (skippedLegacy > 0) {
+      console.warn(`[Monitor] Skipped ${skippedLegacy} legacy monitor(s) with string checkCommand — please re-register with argv arrays`);
     }
   } catch (err) {
     console.warn('[Monitor] Failed to load persisted monitors:', err);
@@ -66,11 +159,30 @@ function saveToDisk(): void {
 
 // Check Execution
 
-function executeCheck(command: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+function executeCheck(argv: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const proc = execFile('bash', ['-c', command], {
+    if (!isValidArgv(argv)) {
+      resolve({ exitCode: 1, stdout: '', stderr: 'invalid checkCommand argv' });
+      return;
+    }
+    const [rawProgram, ...args] = argv;
+    // Double-check the program against the allowlist at the call site so the
+    // flow into `execFile` cannot receive anything unvetted even if
+    // `isValidArgv` were bypassed. The resolved program is always either a
+    // bare name from ALLOWED_PROGRAMS or an absolute path under a trusted
+    // prefix.
+    if (!isAllowedProgram(rawProgram)) {
+      resolve({ exitCode: 1, stdout: '', stderr: 'program not in allowlist' });
+      return;
+    }
+    const program = rawProgram;
+    // No shell: execFile with shell:false treats program/args as literal
+    // tokens. Pipes, redirects, substitutions, and other shell operators
+    // in argv are inert because nothing interprets them.
+    const proc = execFile(program, args, {
       timeout: CHECK_TIMEOUT_MS,
       maxBuffer: 1024 * 1024,
+      shell: false,
     }, (error, stdout, stderr) => {
       resolve({
         exitCode: error?.code !== undefined
@@ -98,10 +210,12 @@ function evaluateResult(
     }
 
     case 'output-regex': {
-      if (check.failurePattern && new RegExp(check.failurePattern).test(stdout)) {
+      const failureRe = safeCompileRegex(check.failurePattern);
+      if (failureRe && failureRe.test(stdout)) {
         return 'failed';
       }
-      if (new RegExp(check.successPattern).test(stdout)) {
+      const successRe = safeCompileRegex(check.successPattern);
+      if (successRe && successRe.test(stdout)) {
         return 'completed';
       }
       return 'running';
@@ -168,6 +282,10 @@ export function initMonitors(configs?: LongRunningMonitorConfig[]): void {
  * Register a monitor
  */
 export function registerMonitor(config: LongRunningMonitorConfig): LongRunningMonitor {
+  if (!isValidArgv(config.checkCommand)) {
+    throw new Error('registerMonitor: checkCommand must be a non-empty string[] of safe tokens');
+  }
+
   const monitor: LongRunningMonitor = {
     ...config,
     checkInterval: config.checkInterval ?? 1,
@@ -265,7 +383,7 @@ export async function checkAllMonitors(): Promise<number> {
 
       checkedCount++;
     } catch (err) {
-      console.error(`[Monitor] Check failed for ${monitor.name}:`, err);
+      console.error('[Monitor] Check failed for %s:', monitor.name, err);
     }
   }
 

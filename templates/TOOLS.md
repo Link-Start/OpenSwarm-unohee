@@ -28,8 +28,8 @@ Things like:
 
 ### SSH
 
-- home-server → 192.168.1.100, user: admin
-- dev-box → unohee@192.168.1.50
+- home-server → 192.168.x.x, user: admin
+- dev-box → user@192.168.x.x
 
 ### TTS
 

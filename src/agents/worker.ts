@@ -6,6 +6,7 @@
 import type { WorkerResult } from './agentPair.js';
 import * as gitTracker from '../support/gitTracker.js';
 import { t, getPrompts } from '../locale/index.js';
+import type { WorkerContext } from '../locale/types.js';
 import type { AdapterName, ProcessContext } from '../adapters/types.js';
 import { getAdapter, spawnCli } from '../adapters/index.js';
 import { expandPath } from '../core/config.js';
@@ -25,6 +26,8 @@ export interface WorkerOptions {
   projectName?: string;        // Linear project name
   onLog?: (line: string) => void;  // Callback for stdout streaming
   processContext?: ProcessContext;
+  /** 코드 컨텍스트 (impact analysis + registry briefs) */
+  workerContext?: WorkerContext;
 }
 
 // Prompts
@@ -37,6 +40,7 @@ function buildWorkerPrompt(options: WorkerOptions): string {
     taskTitle: options.taskTitle,
     taskDescription: options.taskDescription,
     previousFeedback: options.previousFeedback,
+    context: options.workerContext,
   });
 }
 
@@ -69,6 +73,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       maxTurns: options.maxTurns,
       onLog: options.onLog,
       processContext: options.processContext,
+      systemPrompt: getPrompts().systemPrompt,
     });
 
     // Parse result via adapter

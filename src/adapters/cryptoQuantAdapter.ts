@@ -97,7 +97,7 @@ export class CryptoQuantAdapter {
       limit: daysBack,
     };
 
-    const queryString = new URLSearchParams(params as any).toString();
+    const queryString = new URLSearchParams(params as any).toString(); // eslint-disable-line @typescript-eslint/no-explicit-any -- mixed param types
     const url = `${this.baseUrl}/stablecoin/exchange-flows/netflow?${queryString}`;
 
     console.log(`[CryptoQuantAdapter] Fetching USDC Netflow: ${exchange} (${daysBack}d)`);
@@ -110,7 +110,7 @@ export class CryptoQuantAdapter {
       }
 
       // Transform API response to USDCNetflowData
-      const data: USDCNetflowData[] = response.data.map((item: any) => ({
+      const data: USDCNetflowData[] = response.data.map((item: any) => ({ // eslint-disable-line @typescript-eslint/no-explicit-any -- API response
         timestamp: item.timestamp || Math.floor(new Date(item.date).getTime() / 1000),
         date: item.date,
         exchange: exchange,

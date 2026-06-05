@@ -8,7 +8,7 @@ import type { WorkerResult, ReviewResult } from '../agents/agentPair.js';
 // Re-export for convenience
 export type { WorkerResult, ReviewResult };
 
-export type AdapterName = 'claude' | 'codex';
+export type AdapterName = 'claude' | 'codex' | 'gpt' | 'local' | 'lmstudio';
 
 /**
  * Raw result from a CLI process execution
@@ -39,6 +39,8 @@ export interface CliRunOptions {
   maxTurns?: number;
   onLog?: (line: string) => void;
   processContext?: ProcessContext;
+  /** 시스템 프롬프트 (GPT/Local 에이전틱 루프에서 사용) */
+  systemPrompt?: string;
 }
 
 /**
@@ -74,6 +76,12 @@ export interface CliAdapter {
     onLog: (line: string) => void,
     buffer?: string,
   ): string;
+
+  /**
+   * Optional direct execution (bypasses spawnCli shell spawn).
+   * Used by adapters that call APIs directly instead of spawning a CLI process.
+   */
+  run?(options: CliRunOptions): Promise<CliRunResult>;
 
   /** Parse raw CLI output into a WorkerResult */
   parseWorkerOutput(raw: CliRunResult): WorkerResult;

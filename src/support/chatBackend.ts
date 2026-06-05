@@ -36,17 +36,47 @@ export const CHAT_MODEL_ALIASES: Record<AdapterName, Record<string, string>> = {
     gpt5: 'gpt-5-codex',
     gpt5codex: 'gpt-5-codex',
   },
+  gpt: {
+    'gpt-4o': 'gpt-4o',
+    'o3': 'o3',
+    'o4-mini': 'o4-mini',
+    'gpt-4.1': 'gpt-4.1',
+  },
+  local: {
+    'gemma4': 'gemma3:4b',
+    'gemma4-e4b': 'gemma3:4b',
+    'gemma': 'gemma3:4b',
+    'llama3': 'llama3.3:latest',
+    'llama': 'llama3.3:latest',
+    'mistral': 'mistral:latest',
+    'codestral': 'codestral:latest',
+    'qwen': 'qwen2.5-coder:7b',
+    'qwen-coder': 'qwen2.5-coder:7b',
+    'deepseek': 'deepseek-coder-v2:latest',
+    'phi': 'phi4:latest',
+    'starcoder': 'starcoder2:7b',
+  },
+  lmstudio: {
+    local: process.env.LMSTUDIO_MODEL ?? 'local-model',
+    lmstudio: process.env.LMSTUDIO_MODEL ?? 'local-model',
+  },
 };
 
 export function inferProviderFromModel(model?: string): AdapterName {
   if (!model) return getDefaultAdapterName();
-  return model.startsWith('gpt-') || model.includes('codex') ? 'codex' : 'claude';
+  if (model.includes('codex')) return 'codex';
+  if (model.startsWith('gpt-') || model.startsWith('o3') || model.startsWith('o4')) return 'gpt';
+  // 로컬 모델 패턴: ollama 태그 형식 (name:tag) 또는 알려진 오픈소스 모델
+  if (model.includes(':') || /^(gemma|llama|mistral|codestral|qwen|deepseek|phi|starcoder)/i.test(model)) return 'local';
+  return 'claude';
 }
 
 export function getDefaultChatModel(provider: AdapterName): string {
-  return provider === 'codex'
-    ? 'gpt-5-codex'
-    : 'claude-sonnet-4-5-20250929';
+  if (provider === 'codex') return 'gpt-5-codex';
+  if (provider === 'gpt') return 'gpt-4o';
+  if (provider === 'local') return 'gemma3:4b';
+  if (provider === 'lmstudio') return process.env.LMSTUDIO_MODEL ?? 'local-model';
+  return 'claude-sonnet-4-5-20250929';
 }
 
 export function resolveChatModel(input: string | undefined, provider: AdapterName): string {

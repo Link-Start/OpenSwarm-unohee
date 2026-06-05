@@ -323,6 +323,27 @@ function createUI() {
     hidden: true,
   });
 
+  const issuesBox = blessed.box({
+    top: 2,
+    left: 0,
+    width: '100%',
+    height: '100%-9',
+    scrollable: true,
+    alwaysScroll: true,
+    mouse: true,
+    scrollbar: {
+      ch: '│',
+      style: { fg: colors.scrollbar },
+    },
+    tags: true,
+    border: { type: 'line' },
+    label: ' {#00ccdd-fg}Issues{/} ',
+    style: {
+      border: { fg: colors.border },
+    },
+    hidden: true,
+  });
+
   // Input box - textarea for multiline + Korean support
   const inputBox = blessed.textarea({
     bottom: 1,
@@ -368,6 +389,7 @@ function createUI() {
   screen.append(tasksBox);
   screen.append(stuckBox);
   screen.append(logsBox);
+  screen.append(issuesBox);
   screen.append(inputBox);
   screen.append(helpBar);
 
@@ -380,6 +402,7 @@ function createUI() {
     tasksBox,
     stuckBox,
     logsBox,
+    issuesBox,
     inputBox,
     helpBar,
   };
@@ -391,7 +414,8 @@ function updateTabBar(ui: ReturnType<typeof createUI>, currentTab: number) {
     { key: '2', name: 'Projects', icon: '📁' },
     { key: '3', name: 'Tasks', icon: '✓' },
     { key: '4', name: 'Stuck', icon: '⚠' },
-    { key: '5', name: 'Logs', icon: '📝' },
+    { key: '5', name: 'Issues', icon: '🎫' },
+    { key: '6', name: 'Logs', icon: '📝' },
   ];
 
   const content = tabs.map((tab, idx) => {
@@ -413,6 +437,7 @@ function switchTab(state: AppState, ui: ReturnType<typeof createUI>, tabIndex: n
   ui.projectsBox.hide();
   ui.tasksBox.hide();
   ui.stuckBox.hide();
+  ui.issuesBox.hide();
   ui.logsBox.hide();
 
   switch (tabIndex) {
@@ -432,6 +457,10 @@ function switchTab(state: AppState, ui: ReturnType<typeof createUI>, tabIndex: n
       loadStuckData(ui.stuckBox);
       break;
     case 4:
+      ui.issuesBox.show();
+      loadIssuesData(ui.issuesBox);
+      break;
+    case 5:
       ui.logsBox.show();
       break;
   }
@@ -656,6 +685,91 @@ async function loadStuckData(box: blessed.Widgets.BoxElement) {
     box.setContent(`\n{center}{#ef4444-fg}Failed to load stuck issues{/}\n{#718096-fg}${err}{/}{/center}`);
   }
 }
+// Issues Data Loader (로컬 이슈 트래커)
+async function loadIssuesData(box: blessed.Widgets.BoxElement) {
+  try {
+    const response = await fetch('http://127.0.0.1:3847/graphql', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: `{
+          issues(filter: { limit: 50 }) {
+            issues { id title status priority projectId assignee labels updatedAt }
+            total
+          }
+          issueStats {
+            total
+            byStatus { status count }
+            recentlyCreated
+            recentlyClosed
+          }
+        }`,
+      }),
+    });
+
+    const json = await response.json() as any;
+    if (json.errors) throw new Error(json.errors[0].message);
+    const { issues: { issues, total }, issueStats } = json.data;
+
+    if (total === 0) {
+      box.setContent('\n{center}{#718096-fg}No issues tracked{/}\n\n{#445544-fg}Create issues via web dashboard (:3847/issues){/}{/center}');
+      return;
+    }
+
+    const lines = [
+      '',
+      `  {#00ccdd-fg}{bold}🎫 ISSUES{/bold}{/} — total: {bold}${issueStats.total}{/bold}  new(7d): {#00ff41-fg}${issueStats.recentlyCreated}{/}  closed(7d): {#ffaa00-fg}${issueStats.recentlyClosed}{/}`,
+      '',
+    ];
+
+    // 상태별 요약
+    const statusLine = (issueStats.byStatus as Array<{ status: string; count: number }>)
+      .map((s: { status: string; count: number }) => {
+        const colors: Record<string, string> = {
+          backlog: '#718096', todo: '#e2e8f0', in_progress: '#ffaa00',
+          in_review: '#00ccdd', done: '#00ff41', cancelled: '#ef4444',
+        };
+        return `{${colors[s.status] || '#718096'}-fg}${s.status}: ${s.count}{/}`;
+      })
+      .join('  ');
+    lines.push(`  ${statusLine}`);
+    lines.push('  ' + '─'.repeat(70));
+    lines.push('');
+
+    // 이슈 목록
+    const priorityIcons: Record<string, string> = {
+      urgent: '{#ef4444-fg}●{/}', high: '{#ffaa00-fg}●{/}',
+      medium: '{#00ccdd-fg}●{/}', low: '{#718096-fg}●{/}', none: '{#445544-fg}○{/}',
+    };
+    const statusColors: Record<string, string> = {
+      backlog: '#718096', todo: '#e2e8f0', in_progress: '#ffaa00',
+      in_review: '#00ccdd', done: '#00ff41', cancelled: '#ef4444',
+    };
+
+    for (const iss of issues) {
+      const icon = priorityIcons[iss.priority] || '{#718096-fg}●{/}';
+      const stColor = statusColors[iss.status] || '#718096';
+      const title = iss.title.length > 50 ? iss.title.substring(0, 50) + '...' : iss.title;
+      const labels = (iss.labels || []).slice(0, 2).map((l: string) => `{#445544-fg}[${l}]{/}`).join('');
+
+      lines.push(`  ${icon} {${stColor}-fg}${iss.status.padEnd(12)}{/} {bold}${title}{/bold}`);
+      lines.push(`    {#718096-fg}${iss.id.slice(0, 6)} | ${iss.projectId}${iss.assignee ? ' | ' + iss.assignee : ''}{/} ${labels}`);
+      lines.push('');
+    }
+
+    if (total > 50) {
+      lines.push(`  {#718096-fg}... and ${total - 50} more issues{/}`);
+    }
+
+    lines.push('');
+    lines.push('  {#445544-fg}Open web dashboard for full management: http://localhost:3847/issues{/}');
+
+    box.setContent(lines.join('\n'));
+  } catch (err) {
+    box.setContent(`\n{center}{#ef4444-fg}Failed to load issues{/}\n{#718096-fg}${err}{/}\n\n{#445544-fg}Make sure the service is running{/}{/center}`);
+  }
+}
+
 // Loading Spinner (inline in chat)
 function startSpinner(ui: ReturnType<typeof createUI>): { interval: NodeJS.Timeout; lineIndex: number } {
   let frameIndex = 0;
@@ -1042,11 +1156,11 @@ export async function main(): Promise<void> {
   ui.screen.key(['4'], () => switchTab(state, ui, 3));
   ui.screen.key(['5'], () => switchTab(state, ui, 4));
   ui.screen.key(['tab'], () => {
-    const next = (state.currentTab + 1) % 5;
+    const next = (state.currentTab + 1) % 6;
     switchTab(state, ui, next);
   });
   ui.screen.key(['S-tab'], () => {
-    const prev = (state.currentTab - 1 + 5) % 5;
+    const prev = (state.currentTab - 1 + 6) % 6;
     switchTab(state, ui, prev);
   });
 
@@ -1137,6 +1251,7 @@ export async function main(): Promise<void> {
     if (state.currentTab === 1) loadProjectsData(ui.projectsBox);
     if (state.currentTab === 2) loadTasksData(ui.tasksBox);
     if (state.currentTab === 3) loadStuckData(ui.stuckBox);
+    if (state.currentTab === 4) loadIssuesData(ui.issuesBox);
     safeRender();
   }, 5000);
 

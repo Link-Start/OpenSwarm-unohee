@@ -119,7 +119,7 @@ function emitFormattedText(text: string, onLog: (line: string) => void): void {
 /**
  * Summarize tool_use input
  */
-function summarizeToolInput(name: string, input: any): string {
+function summarizeToolInput(name: string, input: any): string { // eslint-disable-line @typescript-eslint/no-explicit-any -- Claude API response
   if (!input) return '';
   // File-related tools: show path only
   if (input.file_path) return input.file_path;

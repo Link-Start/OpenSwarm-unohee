@@ -388,12 +388,46 @@ export interface LocaleMessages {
 /**
  * Prompt template functions for each agent role.
  */
+/** Worker에 주입할 코드 컨텍스트 (반복 횟수 감소 목적) */
+export interface WorkerContext {
+  /** Knowledge Graph 기반 영향 분석 */
+  impactAnalysis?: {
+    directModules: string[];
+    dependentModules: string[];
+    testFiles: string[];
+    estimatedScope: 'small' | 'medium' | 'large';
+  };
+  /** 변경 대상 파일별 entity 상태 요약 */
+  registryBriefs?: Array<{
+    filePath: string;
+    summary: string;  // "5 entities, 1 deprecated, 2 untested"
+    highlights: string[];  // deprecated/broken/critical warning 엔티티명
+    /** 파일 내 entity 목록 (Worker가 파일을 읽지 않고 구조 파악 가능) */
+    entities?: Array<{
+      kind: string;    // function, class, type, etc.
+      name: string;
+      signature?: string;  // 시그니처 (파라미터, 반환타입)
+      status: string;  // active, deprecated, broken
+      hasTests: boolean;
+    }>;
+  }>;
+  /** Draft Analyzer 사전 분석 결과 (Haiku) */
+  draftAnalysis?: {
+    taskType: string;
+    intentSummary: string;
+    relevantFiles: string[];
+    suggestedApproach: string;
+    projectStats?: string;
+  };
+}
+
 export interface PromptTemplates {
   systemPrompt: string;
   buildWorkerPrompt: (opts: {
     taskTitle: string;
     taskDescription: string;
     previousFeedback?: string;
+    context?: WorkerContext;
   }) => string;
   buildReviewerPrompt: (opts: {
     taskTitle: string;
@@ -416,6 +450,13 @@ export interface PromptTemplates {
       dependentModules: string[];
       testFiles: string[];
       estimatedScope: 'small' | 'medium' | 'large';
+    };
+    draftAnalysis?: {
+      taskType: string;
+      intentSummary: string;
+      relevantFiles: string[];
+      suggestedApproach: string;
+      projectStats?: string;
     };
   }) => string;
 }

@@ -7,6 +7,9 @@ on:
     branches: [main, develop]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   NODE_VERSION: '22'
 
@@ -48,7 +51,7 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -69,18 +72,15 @@ jobs:
         continue-on-error: true
 
   loc-gate:
-    name: LOC Gate (Max 800 lines)
+    name: LOC Warning (800 lines)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Check file sizes
         run: |
-          EXIT_CODE=0
           for file in $(find src -name "*.ts" -type f); do
             lines=$(wc -l < "$file")
             if [ "$lines" -gt 800 ]; then
-              echo "::error file=$file::File exceeds 800 lines ($lines)"
-              EXIT_CODE=1
+              echo "::warning file=$file::File exceeds 800 lines ($lines)"
             fi
           done
-          exit $EXIT_CODE

@@ -7,6 +7,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { WorkerResult } from './agentPair.js';
 import type { PipelineGuardsConfig } from '../core/types.js';
+import { getRegistryStore } from '../registry/sqliteStore.js';
+import { scanFile as scanFileForBs } from '../registry/bsDetector.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -90,8 +92,9 @@ async function runQualityGate(
         cwd: projectPath,
         timeout: 60_000,
       });
-    } catch (err: any) {
-      const stderr = err.stderr || err.stdout || String(err);
+    } catch (err: unknown) {
+      const execErr = err as { stderr?: string; stdout?: string };
+      const stderr = execErr.stderr || execErr.stdout || String(err);
       issues.push(`TypeScript check failed: ${stderr.slice(0, 500)}`);
     }
   }
@@ -102,8 +105,9 @@ async function runQualityGate(
         cwd: projectPath,
         timeout: 60_000,
       });
-    } catch (err: any) {
-      const stderr = err.stderr || err.stdout || String(err);
+    } catch (err: unknown) {
+      const execErr = err as { stderr?: string; stdout?: string };
+      const stderr = execErr.stderr || execErr.stdout || String(err);
       issues.push(`Ruff check failed: ${stderr.slice(0, 500)}`);
     }
   }
@@ -204,6 +208,101 @@ function runUncertaintyDetection(workerResult: WorkerResult): GuardResult {
   return { passed: issues.length === 0, guard, issues, blocking: false };
 }
 
+/**
+ * Registry check: scan changed files against code registry.
+ * Non-blocking — warns about deprecated/broken entities being modified,
+ * untested entities being added, or active warnings on touched code.
+ */
+function runRegistryCheck(workerResult: WorkerResult): GuardResult {
+  const guard = 'registryCheck';
+  const issues: string[] = [];
+
+  try {
+    const store = getRegistryStore();
+
+    for (const filePath of workerResult.filesChanged) {
+      const brief = store.fileBrief(filePath);
+      if (brief.entities.length === 0) continue;
+
+      // deprecated 엔티티가 있는 파일 수정 시 경고
+      const deprecated = brief.entities.filter(e => e.status === 'deprecated');
+      if (deprecated.length > 0) {
+        issues.push(
+          `[${filePath}] ${deprecated.length} deprecated entity modified: ` +
+          deprecated.map(e => `${e.name}${e.deprecatedReason ? ` (${e.deprecatedReason})` : ''}`).join(', ')
+        );
+      }
+
+      // broken 엔티티가 있는 파일 수정 시 경고
+      const broken = brief.entities.filter(e => e.status === 'broken');
+      if (broken.length > 0) {
+        issues.push(
+          `[${filePath}] ${broken.length} broken entity: ${broken.map(e => e.name).join(', ')}`
+        );
+      }
+
+      // 미해결 critical/error 경고가 있는 엔티티
+      const withCriticalWarnings = brief.entities.filter(e =>
+        e.warnings.some(w => !w.resolved && (w.severity === 'critical' || w.severity === 'error'))
+      );
+      if (withCriticalWarnings.length > 0) {
+        for (const e of withCriticalWarnings) {
+          const criticals = e.warnings.filter(w => !w.resolved && (w.severity === 'critical' || w.severity === 'error'));
+          issues.push(
+            `[${filePath}] ${e.name}: ${criticals.map(w => `${w.severity}/${w.category}: ${w.message}`).join('; ')}`
+          );
+        }
+      }
+
+      // high-risk + untested 조합 경고
+      const riskyUntested = brief.entities.filter(
+        e => e.riskLevel === 'high' && !e.hasTests && e.status === 'active'
+      );
+      if (riskyUntested.length > 0) {
+        issues.push(
+          `[${filePath}] ${riskyUntested.length} high-risk untested: ${riskyUntested.map(e => e.name).join(', ')}`
+        );
+      }
+    }
+  } catch (err) {
+    // 레지스트리 DB가 없거나 접근 불가 시 무시
+    console.warn('[Guard:registryCheck] Registry unavailable:', err);
+  }
+
+  return { passed: issues.length === 0, guard, issues, blocking: false };
+}
+
+/**
+ * BS Detector guard: scan changed files for BS patterns in actual source code.
+ * CRITICAL BS → blocking. WARNING/MINOR → non-blocking.
+ */
+async function runBsDetectorGuard(
+  workerResult: WorkerResult,
+  projectPath: string,
+): Promise<GuardResult> {
+  const guard = 'bsDetector';
+  const issues: string[] = [];
+  let hasCritical = false;
+
+  try {
+    const { join } = await import('node:path');
+    for (const filePath of workerResult.filesChanged) {
+      const fullPath = join(projectPath, filePath);
+      const bsIssues = await scanFileForBs(fullPath);
+
+      for (const bs of bsIssues) {
+        const prefix = bs.severity === 'critical' ? 'CRITICAL' : bs.severity === 'warning' ? 'WARNING' : 'MINOR';
+        issues.push(`[${prefix}] ${filePath}:${bs.line} — ${bs.message} (${bs.matchedText})`);
+        if (bs.severity === 'critical') hasCritical = true;
+      }
+    }
+  } catch (err) {
+    console.warn('[Guard:bsDetector] Error:', err);
+  }
+
+  return { passed: issues.length === 0, guard, issues, blocking: hasCritical };
+}
+
 // Guard Runner
 
 /**
@@ -230,6 +329,14 @@ export async function runGuards(
 
   if (config.uncertaintyDetection) {
     results.push(runUncertaintyDetection(workerResult));
+  }
+
+  if (config.registryCheck) {
+    results.push(runRegistryCheck(workerResult));
+  }
+
+  if (config.bsDetector) {
+    results.push(await runBsDetectorGuard(workerResult, projectPath));
   }
 
   // conventionalCommits is checked separately (needs commit message)

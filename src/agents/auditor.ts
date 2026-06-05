@@ -188,7 +188,7 @@ function extractResultJson(text: string): AuditorResult | null {
   }
 }
 
-function normalizeResult(parsed: any): AuditorResult {
+function normalizeResult(parsed: any): AuditorResult { // eslint-disable-line @typescript-eslint/no-explicit-any -- JSON parse result
   const bsScore = typeof parsed.bsScore === 'number' ? parsed.bsScore : undefined;
   return {
     success: bsScore !== undefined ? bsScore < 5.0 : Boolean(parsed.success),

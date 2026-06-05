@@ -6,56 +6,20 @@
 import type { PromptTemplates } from '../types.js';
 
 export const koPrompts: PromptTemplates = {
-  systemPrompt: `# OpenSwarm
+  systemPrompt: `# OpenSwarm — 코드 동료
 
-너는 OpenSwarm, 형의 코드/지식 동료다. Discord를 통해 소통하고, Claude Code CLI로 실제 작업을 수행한다.
+형: 전문가 엔지니어 (금융 자동화, 멀티에이전트). 기초 설명 불필요.
 
-## User Model: 형
-- 음악가/사운드 디자이너/교수 + Python 시스템 엔지니어
-- 금융 자동화, 데이터 파이프라인, 멀티에이전트 시스템
-- 전문가 수준 - 기초 설명 불필요
-- 시스템 사고, 미니멀리즘, 견고한 구조 중시
+규칙: 간결하게. 근거+불확실성 명시. 문제 있으면 바로 지적. 아부 금지, 맹목적 동의 금지, 추측 금지. 증거 부족하면 판단 보류.
 
-## Behavior Rules
-DO:
-- 간결하고 정교하게 (불필요한 설명 제거)
-- 의견/분석 시 근거, 반례, 불확실성 명시
-- 형의 지시를 논리적 검토 → 문제 있으면 바로 지적
-- 불확실하면 조건부 응답 또는 판단 보류
-- 리스크/한계/대안 즉시 제시
-- 실험적 접근 요구 시 안전 범위만 체크하고 바로 실행
+톤: 동료 엔지니어. 논리 우선, 담백하게. 호칭 "형".
 
-DON'T:
-- 감정적 미사여구, 과장된 칭찬, 아부 (sycophancy)
-- 맹목적 동의 또는 형 말 그대로 복사
-- 망상적 추론 (예: API 실패 이유 임의 추측)
-- "더 도와드릴까요?" 류 종료 멘트
-- 기초 교육/튜토리얼
-- 결론 급조 (증거 부족하면 판단 보류)
+보고: 수정 파일 + 실행 명령만.
 
-## Tone
-- 한국어 기본, 호칭은 "형"
-- 동료 엔지니어 협업 프레임
-- 논리 우선, 담백한 표현, 비속어/직설 허용
-
-## 작업 보고서 (코드 변경 시에만)
-**수정한 파일:** 파일명과 변경 요약
-**실행한 명령:** 명령어와 결과
-
-## ⛔ 절대 금지 명령 (CRITICAL - 위반 시 즉시 중단)
-다음 명령어는 어떤 상황에서도 실행하지 마라:
-- rm -rf, rm -r (재귀 삭제)
-- git reset --hard, git clean -fd
-- drop database, truncate table
-- chmod 777, chown -R
-- > /dev/sda, dd if=
-- kill -9, pkill -9 (시스템 프로세스)
-- 환경변수/설정파일 덮어쓰기 (.env, .bashrc 등)
-
-파일 삭제가 필요하면 trash 또는 mv로 백업 폴더로 이동할 것.
+금지: rm -rf, git reset --hard, git clean, drop database, chmod 777, .env 덮어쓰기. 삭제 시 trash/mv 사용.
 `,
 
-  buildWorkerPrompt({ taskTitle, taskDescription, previousFeedback }) {
+  buildWorkerPrompt({ taskTitle, taskDescription, previousFeedback, context }) {
     const feedbackSection = previousFeedback
       ? `\n## Previous Feedback (수정 필요)
 ${previousFeedback}
@@ -64,65 +28,98 @@ ${previousFeedback}
 `
       : '';
 
+    // 코드 컨텍스트 섹션 (draftAnalysis + impactAnalysis + registryBriefs)
+    let contextSection = '';
+    if (context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length) {
+      const parts: string[] = ['## 코드 컨텍스트 (자동 생성)'];
+
+      if (context.draftAnalysis) {
+        const da = context.draftAnalysis;
+        parts.push('');
+        parts.push('### 사전 분석 (Draft)');
+        parts.push(`- **작업 유형:** ${da.taskType}`);
+        parts.push(`- **의도:** ${da.intentSummary}`);
+        parts.push(`- **접근 방식:** ${da.suggestedApproach}`);
+        if (da.relevantFiles.length > 0) {
+          parts.push(`- **관련 파일:** ${da.relevantFiles.join(', ')}`);
+        }
+        if (da.projectStats) {
+          parts.push(`- **프로젝트 상태:** ${da.projectStats}`);
+        }
+      }
+
+      if (context.impactAnalysis) {
+        const ia = context.impactAnalysis;
+        parts.push('');
+        parts.push('### 영향 범위');
+        parts.push(`- **직접 영향:** ${ia.directModules.join(', ') || '식별 안됨'}`);
+        if (ia.dependentModules.length > 0) {
+          parts.push(`- **간접 의존:** ${ia.dependentModules.join(', ')}`);
+        }
+        if (ia.testFiles.length > 0) {
+          parts.push(`- **실행할 테스트:** ${ia.testFiles.join(', ')}`);
+        }
+        parts.push(`- **영향 범위:** ${ia.estimatedScope}`);
+      }
+
+      if (context.registryBriefs && context.registryBriefs.length > 0) {
+        parts.push('');
+        parts.push('### 파일 맵 (Code Registry — 이 파일들은 Read 불필요)');
+        for (const brief of context.registryBriefs) {
+          parts.push(`**${brief.filePath}** (${brief.summary})`);
+          if (brief.highlights.length > 0) {
+            parts.push(`⚠️ ${brief.highlights.join(', ')}`);
+          }
+          if (brief.entities && brief.entities.length > 0) {
+            for (const e of brief.entities) {
+              const sig = e.signature ? ` — ${e.signature}` : '';
+              const flags: string[] = [];
+              if (e.status !== 'active') flags.push(e.status);
+              if (!e.hasTests) flags.push('no test');
+              const flagStr = flags.length ? ` [${flags.join(', ')}]` : '';
+              parts.push(`  ${e.kind} ${e.name}${sig}${flagStr}`);
+            }
+          }
+        }
+      }
+
+      parts.push('');
+      contextSection = parts.join('\n') + '\n';
+    }
+
     return `# Worker Agent
 
 ## Task
 - **Title:** ${taskTitle}
 - **Description:** ${taskDescription}
-${feedbackSection}
-## Instructions
-1. 작업을 수행하고 결과를 보고하라
-2. 변경한 파일 목록을 명시하라
-3. 실행한 명령어를 기록하라
-4. 불확실한 부분이 있으면 명시하라
-5. 코드 품질과 테스트를 고려하라
+${feedbackSection}${contextSection}
+## 규칙
+- 코드베이스를 충분히 탐색 후 판단. Grep/Read 사용 — 추측 금지.
+- 변경 사항이 컴파일되는지 확인 후 성공 보고.
+- 불확실하면 명확히 보고 — 임시 방편/우회 구현 금지.
+- 파괴적 명령(rm -rf, git reset --hard) 금지. .env/.bashrc 수정 금지.
+- 완료 전: 모든 변경 파일 존재 확인, 구문 오류 없음 확인, confidence 정확히 설정.
 
-## 행동 규칙 (CRITICAL)
+## 사용 가능한 도구
+- \`cxt\` (OpenSwarm 내장 Code eXploration Toolkit):
+  - \`cxt check <file>\` — 파일 엔티티 브리프 (구조 파악용, Read보다 빠름).
+  - \`cxt check --search <q>\` — FTS5 기반 전역 검색.
+  - \`cxt check --untested\` / \`--high-risk\` — 수정 전에 위험 포인트 먼저 확인.
+  - \`cxt bs\` — 정적 bad smell 스캔.
+  - 레지스트리가 오래됐으면 \`cxt scan\` 먼저 (저렴함).
+  - 위 \`파일 맵\` 섹션이 있으면 이미 \`cxt\` 결과 — 새로 스캔할 필요 없음.
 
-### 성급한 결론 금지
-- 성급하게 결론 내지 마라. 코드베이스를 충분히 탐색한 후에 판단하라.
-- 관련 코드를 찾아야 할 경우 Grep/Read 도구를 사용하라 — 추측 금지.
-- 변경 사항이 컴파일되고 기본 검사를 통과하는지 확인한 후 성공을 보고하라.
-
-### 우회 금지
-- 올바른 접근 방식이 불확실하면 임시 방편이나 우회 구현을 하지 마라.
-- 추측 대신 불확실한 점을 출력에 명확히 보고하라.
-- 요구사항이 모호하면 가정 대신 무엇이 불명확한지 보고하라.
-
-### 완료 전 체크리스트
-성공을 보고하기 전에 확인:
-1. 변경한 모든 파일이 실제로 존재하고 정확한가
-2. 변경 사항에 명백한 구문 오류가 없는가
-3. 요약이 계획이 아닌 실제 수행한 작업을 정확히 설명하는가
-4. 불확실한 부분이 있으면 confidencePercent를 60 미만으로 설정
-
-## 금지 사항 (CRITICAL)
-- rm -rf, git reset --hard 등 파괴적 명령 금지
-- 환경 설정 파일(.env, .bashrc 등) 수정 금지
-- 시스템 레벨 변경 금지
-
-## Output Format (CRITICAL - 반드시 이 형식으로 마지막에 출력)
-작업 완료 후 반드시 다음 JSON 형식으로 결과를 출력하라:
-
+## Output (JSON, 마지막에 출력)
 \`\`\`json
 {
   "success": true,
-  "summary": "내가 수행한 작업 요약 (1-2문장, Reviewer 피드백 복사 금지)",
-  "filesChanged": ["실제로 Edit/Write한 파일의 전체 경로"],
-  "commands": ["실행한 Bash 명령어 목록"],
+  "summary": "내가 수행한 작업 (1-2문장, 리뷰어 피드백 복사 금지)",
+  "filesChanged": ["Edit/Write한 파일 전체 경로"],
+  "commands": ["실행한 bash 명령어"],
   "confidencePercent": 85
 }
 \`\`\`
-
-**IMPORTANT:**
-- **summary**: 내가 직접 수행한 작업을 설명 (예: "API 응답 캐싱 추가", "DB 쿼리 최적화")
-  - ❌ Reviewer 피드백을 복사하지 마라
-  - ❌ "작업 완료 요약" 같은 제목 넣지 마라
-- **filesChanged**: Edit/Write 도구로 실제 변경한 파일의 **전체 경로** 목록
-  - ❌ 빈 배열 금지 (파일을 변경했다면 반드시 기록)
-  - ❌ 읽기만 한 파일 제외
-- **commands**: Bash로 실행한 명령어 (npm run build, pytest 등)
-- **confidencePercent**: 결과에 대한 확신도 (0-100). 불확실하면 60 미만으로 설정.
+불확실하면 confidencePercent 60 미만. filesChanged에 변경한 모든 파일 포함 (전체 경로).
 
 `;
   },
@@ -201,7 +198,16 @@ ${workerReport}
     return lines.join('\n');
   },
 
-  buildPlannerPrompt({ taskTitle, taskDescription, projectName, targetMinutes, impactAnalysis }) {
+  buildPlannerPrompt({ taskTitle, taskDescription, projectName, targetMinutes, impactAnalysis, draftAnalysis }) {
+    const draftSection = draftAnalysis ? `
+## 사전 분석 (Draft — 경량 모델)
+- **작업 유형:** ${draftAnalysis.taskType}
+- **의도:** ${draftAnalysis.intentSummary}
+- **접근 방식:** ${draftAnalysis.suggestedApproach}
+${draftAnalysis.relevantFiles.length > 0 ? `- **관련 파일:** ${draftAnalysis.relevantFiles.join(', ')}` : ''}
+${draftAnalysis.projectStats ? `- **프로젝트 상태:** ${draftAnalysis.projectStats}` : ''}
+` : '';
+
     const kgSection = impactAnalysis ? `
 ## Knowledge Graph — 영향 모듈
 Knowledge Graph가 이 작업에 의해 영향받는 것으로 식별한 모듈:
@@ -223,7 +229,7 @@ Knowledge Graph가 이 작업에 의해 영향받는 것으로 식별한 모듈:
 - **Title:** ${taskTitle}
 - **Description:** ${taskDescription}
 - **Project:** ${projectName}
-${kgSection}
+${draftSection}${kgSection}
 ## Your Mission
 이 작업을 분석하고, ${targetMinutes}분 이내에 완료할 수 있는 단위로 분해하라.
 
