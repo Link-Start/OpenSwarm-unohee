@@ -16,6 +16,7 @@ import * as reviewerAgent from '../agents/reviewer.js';
 import * as projectMapper from '../support/projectMapper.js';
 import * as linear from '../linear/index.js';
 import * as planner from '../support/planner.js';
+import type { SubTask } from '../support/planner.js';
 import { analyzeIssue } from '../knowledge/index.js';
 import { runDraftAnalysis, type DraftAnalysis } from '../agents/draftAnalyzer.js';
 import { t } from '../locale/index.js';
@@ -229,6 +230,173 @@ export async function isValidProjectPath(path: string): Promise<boolean> {
 
 // Task Decomposition
 
+/**
+ * Create Linear sub-issues from an (approved) decomposition: create each
+ * sub-issue, register tracking for limits, wire dependencies
+ * (ready→Todo / blocked→Backlog), sync state comments, and trigger an immediate
+ * heartbeat. Shared by the autonomous `decomposeTask` path and the TUI `/plan`
+ * dispatch endpoint so both behave identically (no logic fork). The caller must
+ * have already created the parent issue (`parentIssueId`).
+ */
+export async function createSubIssuesWithDependencies(
+  parentIssueId: string,
+  task: { title: string; issueIdentifier?: string; parentId?: string; linearProject?: { id?: string; name?: string } },
+  subTasks: SubTask[],
+  totalEstimatedMinutes: number,
+  ctx: { reportToDiscord: (msg: string) => Promise<void> | void; scheduleNextHeartbeat?: () => void },
+  taskId: string,
+  dailyLimit: number,
+): Promise<boolean> {
+  const createdSubIssues: Array<{
+    id: string;
+    identifier: string;
+    title: string;
+    dependencies: string[];
+    topoRank: number;
+    estimatedMinutes: number;
+  }> = [];
+
+  for (const [index, subTask] of subTasks.entries()) {
+    const depsStr = subTask.dependencies?.length
+      ? `\n\n${t('runner.decomposition.prerequisite', { deps: subTask.dependencies.join(', ') })}`
+      : '';
+
+    const subDescription = `${subTask.description}\n\n` +
+      `${t('runner.decomposition.estimatedTime', { n: String(subTask.estimatedMinutes) })}${depsStr}\n\n` +
+      t('runner.decomposition.autoDecomposed', { parentTitle: task.title });
+
+    const subResult = await linear.createSubIssue(
+      parentIssueId,
+      subTask.title,
+      subDescription,
+      {
+        priority: subTask.priority,
+        projectId: task.linearProject?.id,
+        estimatedMinutes: subTask.estimatedMinutes,
+      }
+    );
+
+    if ('error' in subResult) {
+      console.error(`[AutonomousRunner] Failed to create sub-issue: ${subResult.error}`);
+      continue;
+    }
+
+    createdSubIssues.push({
+      id: subResult.id,
+      identifier: subResult.identifier,
+      title: subResult.title,
+      dependencies: subTask.dependencies || [],
+      topoRank: index,
+      estimatedMinutes: subTask.estimatedMinutes,
+    });
+
+    console.log(`[AutonomousRunner] Created sub-issue: ${subResult.identifier}`);
+  }
+
+  if (createdSubIssues.length === 0) {
+    console.error('[AutonomousRunner] No sub-issues created');
+    broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'fail' } });
+    return false;
+  }
+
+  // Register decomposition in tracking (for limits)
+  registerDecomposition(
+    parentIssueId,
+    task.parentId, // Parent ID if this task is also a sub-issue
+    createdSubIssues.map(s => s.id)
+  );
+  console.log(`[AutonomousRunner] Registered decomposition: parent=${parentIssueId}, children=${createdSubIssues.length}, daily=${getDailyCreationCount()}/${dailyLimit}`);
+
+  await linear.markAsDecomposed(
+    parentIssueId,
+    createdSubIssues.length,
+    totalEstimatedMinutes
+  );
+
+  const childIdByTitle = new Map(createdSubIssues.map((subIssue) => [subIssue.title, subIssue.id]));
+  const parentState = markTaskDecomposed(parentIssueId, {
+    issueIdentifier: task.issueIdentifier,
+    title: task.title,
+    projectId: task.linearProject?.id,
+    projectName: task.linearProject?.name,
+    parentIssueId: task.parentId,
+    childIssueIds: createdSubIssues.map((subIssue) => subIssue.id),
+  });
+
+  await linear.addComment(
+    parentIssueId,
+    buildTaskStateSyncComment(parentState, 'Parent task decomposed')
+  );
+
+  const subIssueList = createdSubIssues
+    .map((s, i) => `${i + 1}. ${s.identifier}: ${s.title}`)
+    .join('\n');
+
+  await ctx.reportToDiscord(t('runner.decomposition.completed', {
+    original: task.issueIdentifier || parentIssueId || '',
+    count: String(createdSubIssues.length),
+    list: subIssueList,
+    totalMinutes: String(totalEstimatedMinutes),
+  }));
+
+  broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'complete' } });
+  // Log each sub-issue as a log line for the dashboard
+  for (const s of createdSubIssues) {
+    broadcastEvent({ type: 'log', data: { taskId, stage: 'decompose', line: `↳ ${s.identifier}: ${s.title}` } });
+  }
+  console.log(`[AutonomousRunner] Decomposition complete: ${createdSubIssues.length} sub-issues created`);
+
+  for (const subIssue of createdSubIssues) {
+    const dependencyIssueIds = subIssue.dependencies
+      .map((title) => childIdByTitle.get(title))
+      .filter((value): value is string => Boolean(value));
+    const isReady = dependencyIssueIds.length === 0;
+
+    const childState = upsertTaskState(subIssue.id, {
+      issueIdentifier: subIssue.identifier,
+      title: subIssue.title,
+      projectId: task.linearProject?.id,
+      projectName: task.linearProject?.name,
+      parentIssueId: parentIssueId,
+      dependencyIssueIds,
+      dependencyTitles: subIssue.dependencies,
+      topoRank: subIssue.topoRank,
+      execution: {
+        status: isReady ? 'todo' : 'blocked',
+        blockedReason: isReady ? undefined : `Waiting on dependencies: ${dependencyIssueIds.join(', ')}`,
+        retryCount: 0,
+      },
+      linearState: isReady ? 'Todo' : 'Backlog',
+    });
+
+    try {
+      if (isReady) {
+        await linear.updateIssueState(subIssue.id, 'Todo');
+        console.log(`[AutonomousRunner] Moved ${subIssue.identifier} to Todo`);
+      } else {
+        console.log(`[AutonomousRunner] Keeping ${subIssue.identifier} in Backlog until dependencies resolve`);
+      }
+      await linear.addComment(
+        subIssue.id,
+        buildTaskStateSyncComment(
+          childState,
+          isReady ? 'Task ready after decomposition' : 'Task blocked by decomposition dependency'
+        )
+      );
+    } catch (err) {
+      console.warn(`[AutonomousRunner] Failed to initialize ${subIssue.identifier} state:`, err);
+    }
+  }
+
+  // Trigger immediate heartbeat to pick up newly created sub-issues
+  if (ctx.scheduleNextHeartbeat) {
+    console.log('[AutonomousRunner] Scheduling immediate heartbeat to process sub-issues...');
+    ctx.scheduleNextHeartbeat();
+  }
+
+  return true;
+}
+
 export async function decomposeTask(
   ctx: ExecutionContext,
   task: TaskItem,
@@ -329,7 +497,9 @@ export async function decomposeTask(
       projectPath,
       projectName: task.linearProject?.name,
       targetMinutes,
-      model: ctx.plannerModel ?? 'claude-opus-4-7',
+      // Planner runs through the configured adapter loop now (not claude -p);
+      // leave model unset to use the adapter default when no planner model is configured.
+      model: ctx.plannerModel,
       timeoutMs: ctx.plannerTimeoutMs ?? 600000,
       onLog: (line: string) => broadcastEvent({ type: 'log', data: { taskId, stage: 'decompose', line } }),
       impactAnalysis: impactAnalysis ?? undefined,
@@ -363,154 +533,15 @@ export async function decomposeTask(
     return false;
   }
 
-  const createdSubIssues: Array<{
-    id: string;
-    identifier: string;
-    title: string;
-    dependencies: string[];
-    topoRank: number;
-    estimatedMinutes: number;
-  }> = [];
-
-  for (const [index, subTask] of result.subTasks.entries()) {
-    const depsStr = subTask.dependencies?.length
-      ? `\n\n${t('runner.decomposition.prerequisite', { deps: subTask.dependencies.join(', ') })}`
-      : '';
-
-    const subDescription = `${subTask.description}\n\n` +
-      `${t('runner.decomposition.estimatedTime', { n: String(subTask.estimatedMinutes) })}${depsStr}\n\n` +
-      t('runner.decomposition.autoDecomposed', { parentTitle: task.title });
-
-    const subResult = await linear.createSubIssue(
-      task.issueId,
-      subTask.title,
-      subDescription,
-      {
-        priority: subTask.priority,
-        projectId: task.linearProject?.id,
-        estimatedMinutes: subTask.estimatedMinutes,
-      }
-    );
-
-    if ('error' in subResult) {
-      console.error(`[AutonomousRunner] Failed to create sub-issue: ${subResult.error}`);
-      continue;
-    }
-
-    createdSubIssues.push({
-      id: subResult.id,
-      identifier: subResult.identifier,
-      title: subResult.title,
-      dependencies: subTask.dependencies || [],
-      topoRank: index,
-      estimatedMinutes: subTask.estimatedMinutes,
-    });
-
-    console.log(`[AutonomousRunner] Created sub-issue: ${subResult.identifier}`);
-  }
-
-  if (createdSubIssues.length === 0) {
-    console.error('[AutonomousRunner] No sub-issues created');
-    broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'fail' } });
-    return false;
-  }
-
-  // Register decomposition in tracking (for limits)
-  registerDecomposition(
+  return createSubIssuesWithDependencies(
     task.issueId,
-    task.parentId, // Parent ID if this task is also a sub-issue
-    createdSubIssues.map(s => s.id)
+    task,
+    result.subTasks,
+    result.totalEstimatedMinutes,
+    ctx,
+    taskId,
+    dailyLimit,
   );
-  console.log(`[AutonomousRunner] Registered decomposition: parent=${task.issueId}, children=${createdSubIssues.length}, daily=${getDailyCreationCount()}/${dailyLimit}`);
-
-  await linear.markAsDecomposed(
-    task.issueId,
-    createdSubIssues.length,
-    result.totalEstimatedMinutes
-  );
-
-  const childIdByTitle = new Map(createdSubIssues.map((subIssue) => [subIssue.title, subIssue.id]));
-  const parentState = markTaskDecomposed(task.issueId, {
-    issueIdentifier: task.issueIdentifier,
-    title: task.title,
-    projectId: task.linearProject?.id,
-    projectName: task.linearProject?.name,
-    parentIssueId: task.parentId,
-    childIssueIds: createdSubIssues.map((subIssue) => subIssue.id),
-  });
-
-  await linear.addComment(
-    task.issueId,
-    buildTaskStateSyncComment(parentState, 'Parent task decomposed')
-  );
-
-  const subIssueList = createdSubIssues
-    .map((s, i) => `${i + 1}. ${s.identifier}: ${s.title}`)
-    .join('\n');
-
-  await ctx.reportToDiscord(t('runner.decomposition.completed', {
-    original: task.issueIdentifier || task.issueId || '',
-    count: String(createdSubIssues.length),
-    list: subIssueList,
-    totalMinutes: String(result.totalEstimatedMinutes),
-  }));
-
-  broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'complete' } });
-  // Log each sub-issue as a log line for the dashboard
-  for (const s of createdSubIssues) {
-    broadcastEvent({ type: 'log', data: { taskId, stage: 'decompose', line: `↳ ${s.identifier}: ${s.title}` } });
-  }
-  console.log(`[AutonomousRunner] Decomposition complete: ${createdSubIssues.length} sub-issues created`);
-
-  for (const subIssue of createdSubIssues) {
-    const dependencyIssueIds = subIssue.dependencies
-      .map((title) => childIdByTitle.get(title))
-      .filter((value): value is string => Boolean(value));
-    const isReady = dependencyIssueIds.length === 0;
-
-    const childState = upsertTaskState(subIssue.id, {
-      issueIdentifier: subIssue.identifier,
-      title: subIssue.title,
-      projectId: task.linearProject?.id,
-      projectName: task.linearProject?.name,
-      parentIssueId: task.issueId,
-      dependencyIssueIds,
-      dependencyTitles: subIssue.dependencies,
-      topoRank: subIssue.topoRank,
-      execution: {
-        status: isReady ? 'todo' : 'blocked',
-        blockedReason: isReady ? undefined : `Waiting on dependencies: ${dependencyIssueIds.join(', ')}`,
-        retryCount: 0,
-      },
-      linearState: isReady ? 'Todo' : 'Backlog',
-    });
-
-    try {
-      if (isReady) {
-        await linear.updateIssueState(subIssue.id, 'Todo');
-        console.log(`[AutonomousRunner] Moved ${subIssue.identifier} to Todo`);
-      } else {
-        console.log(`[AutonomousRunner] Keeping ${subIssue.identifier} in Backlog until dependencies resolve`);
-      }
-      await linear.addComment(
-        subIssue.id,
-        buildTaskStateSyncComment(
-          childState,
-          isReady ? 'Task ready after decomposition' : 'Task blocked by decomposition dependency'
-        )
-      );
-    } catch (err) {
-      console.warn(`[AutonomousRunner] Failed to initialize ${subIssue.identifier} state:`, err);
-    }
-  }
-
-  // Trigger immediate heartbeat to pick up newly created sub-issues
-  if (ctx.scheduleNextHeartbeat) {
-    console.log('[AutonomousRunner] Scheduling immediate heartbeat to process sub-issues...');
-    ctx.scheduleNextHeartbeat();
-  }
-
-  return true;
 }
 
 // Pipeline Execution

@@ -30,6 +30,9 @@ import { initLocale } from '../locale/index.js';
 import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
 import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
+import * as linear from '../linear/index.js';
+import { createSubIssuesWithDependencies } from '../automation/runnerExecution.js';
+import type { SubTask } from './planner.js';
 
 let server: ReturnType<typeof createServer> | null = null;
 let runnerRef: AutonomousRunner | undefined;
@@ -86,6 +89,81 @@ const execTasks = new Map<string, ExecTaskEntry>();
 
 function cleanupExecTask(taskId: string): void {
   setTimeout(() => { execTasks.delete(taskId); }, 3600000); // 1 hour
+}
+
+/**
+ * Create an in-memory exec task and run it through PairPipeline asynchronously.
+ * Shared by `POST /api/exec` and the `/api/plan/dispatch` fallback (Path B) so a
+ * fix to the exec lifecycle applies to both. Returns the taskId immediately;
+ * status is pollable via GET /api/exec/:taskId.
+ */
+function startExecTask(
+  prompt: string,
+  opts: { projectPath?: string; pipeline?: boolean; workerOnly?: boolean; model?: string } = {},
+): string {
+  const taskId = `exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const resolvedPath = opts.projectPath ?? process.cwd();
+
+  const entry: ExecTaskEntry = { taskId, status: 'queued', createdAt: Date.now() };
+  execTasks.set(taskId, entry);
+
+  // Run pipeline asynchronously
+  (async () => {
+    try {
+      initLocale('en');
+      entry.status = 'running';
+
+      let stages: PipelineStage[];
+      if (opts.workerOnly) {
+        stages = ['worker'];
+      } else if (opts.pipeline) {
+        stages = ['worker', 'reviewer', 'tester', 'documenter'];
+      } else {
+        stages = ['worker', 'reviewer'];
+      }
+
+      const roles: Record<string, RoleConfig> = {};
+      if (opts.model) {
+        roles.worker = { enabled: true, model: opts.model, timeoutMs: 0 };
+      }
+
+      const task: TaskItem = {
+        id: taskId,
+        source: 'local',
+        title: prompt,
+        description: prompt,
+        priority: 3,
+        projectPath: resolvedPath,
+        createdAt: Date.now(),
+      };
+
+      const pipelineInstance = new PairPipeline({
+        stages,
+        maxIterations: 3,
+        roles: Object.keys(roles).length > 0 ? roles as any : undefined,
+      });
+
+      pipelineInstance.on('stage:start', ({ stage }: { stage: string }) => {
+        entry.currentStage = stage;
+      });
+
+      const result: PipelineResult = await pipelineInstance.run(task, resolvedPath);
+
+      entry.status = 'completed';
+      entry.result = {
+        success: result.success,
+        summary: result.workerResult?.summary,
+        finalStatus: result.finalStatus,
+      };
+    } catch (err) {
+      entry.status = 'failed';
+      entry.error = err instanceof Error ? err.message : String(err);
+    } finally {
+      cleanupExecTask(taskId);
+    }
+  })();
+
+  return taskId;
 }
 
 // Pinned + enabled repos persistence
@@ -947,80 +1025,97 @@ export async function startWebServer(port: number = 3847): Promise<void> {
             return;
           }
 
-          const taskId = `exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-          const resolvedPath = projectPath ?? process.cwd();
-
-          const entry: ExecTaskEntry = {
-            taskId,
-            status: 'queued',
-            createdAt: Date.now(),
-          };
-          execTasks.set(taskId, entry);
+          const taskId = startExecTask(prompt, { projectPath, pipeline, workerOnly, model });
 
           res.writeHead(202, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ taskId, status: 'queued' }));
 
-          // Run pipeline asynchronously
-          (async () => {
-            try {
-              initLocale('en');
-              entry.status = 'running';
-
-              // Determine stages
-              let stages: PipelineStage[];
-              if (workerOnly) {
-                stages = ['worker'];
-              } else if (pipeline) {
-                stages = ['worker', 'reviewer', 'tester', 'documenter'];
-              } else {
-                stages = ['worker', 'reviewer'];
-              }
-
-              // Build role config
-              const roles: Record<string, RoleConfig> = {};
-              if (model) {
-                roles.worker = { enabled: true, model, timeoutMs: 0 };
-              }
-
-              const task: TaskItem = {
-                id: taskId,
-                source: 'local',
-                title: prompt,
-                description: prompt,
-                priority: 3,
-                projectPath: resolvedPath,
-                createdAt: Date.now(),
-              };
-
-              const pipelineInstance = new PairPipeline({
-                stages,
-                maxIterations: 3,
-                roles: Object.keys(roles).length > 0 ? roles as any : undefined,
-              });
-
-              pipelineInstance.on('stage:start', ({ stage }: { stage: string }) => {
-                entry.currentStage = stage;
-              });
-
-              const result: PipelineResult = await pipelineInstance.run(task, resolvedPath);
-
-              entry.status = 'completed';
-              entry.result = {
-                success: result.success,
-                summary: result.workerResult?.summary,
-                finalStatus: result.finalStatus,
-              };
-            } catch (err) {
-              entry.status = 'failed';
-              entry.error = err instanceof Error ? err.message : String(err);
-            } finally {
-              cleanupExecTask(taskId);
-            }
-          })();
-
         } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        }
+
+      // ---- Plan dispatch: TUI /plan cockpit → daemon loop ----
+      } else if (url === '/api/plan/dispatch' && req.method === 'POST') {
+        const body = await readBody(req);
+        try {
+          const { goal, projectPath, subTasks } = JSON.parse(body) as {
+            goal: string;
+            projectPath?: string;
+            subTasks?: SubTask[];
+          };
+          if (!goal?.trim()) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Missing goal' }));
+            return;
+          }
+          const resolvedPath = projectPath ?? process.cwd();
+          const tasks = Array.isArray(subTasks) ? subTasks : [];
+          const triggerHeartbeat = () => {
+            runnerRef?.heartbeat().catch((e: Error) => console.error('[Web] plan heartbeat error:', e));
+          };
+
+          // Path A — Linear configured: create a parent issue + sub-issues with
+          // dependency wiring (reusing the autonomous engine), then heartbeat.
+          if (linear.isLinearInitialized()) {
+            const parent = await linear.createIssue(
+              goal,
+              `Planned via the \`/plan\` cockpit.\n\n${tasks.length} sub-task(s) dispatched.`,
+              [],
+            );
+            if ('error' in parent) {
+              res.writeHead(502, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: `Linear: ${parent.error}` }));
+              return;
+            }
+
+            if (tasks.length === 0) {
+              // Planner saw no decomposition — run the goal itself as one task.
+              await linear.updateIssueState(parent.id, 'Todo').catch(() => {});
+              triggerHeartbeat();
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({
+                mode: 'linear',
+                parentIssue: { id: parent.id, identifier: parent.identifier },
+                subIssues: [],
+              }));
+              return;
+            }
+
+            const totalMinutes = tasks.reduce((sum, t) => sum + (t.estimatedMinutes || 0), 0);
+            await createSubIssuesWithDependencies(
+              parent.id,
+              { title: goal },
+              tasks,
+              totalMinutes,
+              { reportToDiscord: () => {}, scheduleNextHeartbeat: triggerHeartbeat },
+              parent.id,
+              20,
+            );
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              mode: 'linear',
+              parentIssue: { id: parent.id, identifier: parent.identifier },
+            }));
+            return;
+          }
+
+          // Path B (fallback) — no Linear: run each sub-task via the exec pipeline.
+          const items: SubTask[] = tasks.length > 0
+            ? tasks
+            : [{ title: goal, description: goal, estimatedMinutes: 0, priority: 3 }];
+          const taskIds = items.map((st) =>
+            startExecTask(`${st.title}\n\n${st.description ?? ''}`.trim(), {
+              projectPath: resolvedPath,
+              pipeline: true,
+            }),
+          );
+          res.writeHead(202, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ mode: 'exec', taskIds }));
+
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Invalid JSON' }));
         }
 
       // ---- Exec: task status ----

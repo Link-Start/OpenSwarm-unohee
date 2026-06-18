@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs';
 import { loadConfig } from '../core/config.js';
 import { getDefaultAdapterName, type AdapterName } from '../adapters/index.js';
 import { getDefaultChatModel, resolveChatModel, runChatCompletion, shortenChatModel } from './chatBackend.js';
+import { runPlanCommand, type PlanIO } from './planCommand.js';
 // Constants
 const CHAT_DIR = resolve(homedir(), '.openswarm', 'chat');
 
@@ -60,6 +61,8 @@ type AppState = {
     avgTokensPerSec: number;
     totalRequests: number;
   };
+  /** When set, the next submitted input line is routed here (e.g. /plan approval) instead of chat. */
+  pendingInput?: (value: string) => void;
 };
 // Session Management
 async function ensureChatDir(): Promise<void> {
@@ -1028,12 +1031,45 @@ async function handleCommand(
       break;
     }
 
+    case 'plan': {
+      const goal = args.join(' ').trim();
+      if (!goal) {
+        ui.chatLog.log('');
+        ui.chatLog.log('  {#fbbf24-fg}Usage: /plan <goal>{/}');
+        ui.chatLog.log('');
+        safeRender();
+        break;
+      }
+      const io: PlanIO = {
+        print: (line: string) => {
+          ui.chatLog.log(line ? `  ${line}` : '');
+          safeRender();
+        },
+        confirm: (prompt: string) => new Promise<'yes' | 'no' | 'edit'>((resolve) => {
+          ui.chatLog.log(`  {#fbbf24-fg}${prompt}{/}`);
+          safeRender();
+          state.pendingInput = (v: string) => {
+            const a = v.trim().toLowerCase();
+            resolve(a === 'y' || a === 'yes' ? 'yes' : a === 'e' || a === 'edit' ? 'edit' : 'no');
+          };
+        }),
+        promptText: (prompt: string) => new Promise<string>((resolve) => {
+          ui.chatLog.log(`  {#fbbf24-fg}${prompt}{/}`);
+          safeRender();
+          state.pendingInput = (v: string) => resolve(v);
+        }),
+      };
+      await runPlanCommand(goal, io, { projectPath: process.cwd() });
+      break;
+    }
+
     case 'help':
     case 'h':
     case '?':
       ui.chatLog.log('');
       ui.chatLog.log('  {bold}Available Commands{/bold}');
       ui.chatLog.log('');
+      ui.chatLog.log('    {#60a5fa-fg}/plan{/} <goal>   Decompose a goal & dispatch it to the loop');
       ui.chatLog.log('    {#60a5fa-fg}/clear{/}         Clear conversation');
       ui.chatLog.log('    {#60a5fa-fg}/provider{/} [id] Change provider {#718096-fg}(claude/codex){/}');
       ui.chatLog.log('    {#60a5fa-fg}/model{/} [name]  Change model {#718096-fg}(sonnet/haiku/opus){/}');
@@ -1213,6 +1249,14 @@ export async function main(): Promise<void> {
     ui.inputBox.clearValue();
     ui.inputBox.focus();
     safeRender();
+
+    // An in-progress /plan approval consumes the next line, not chat/commands.
+    if (state.pendingInput) {
+      const resolve = state.pendingInput;
+      state.pendingInput = undefined;
+      resolve(trimmed);
+      return;
+    }
 
     if (trimmed.startsWith('/')) {
       await handleCommand(trimmed, state, ui);

@@ -13,6 +13,7 @@ import { existsSync } from 'node:fs';
 import { loadConfig } from '../core/config.js';
 import { getDefaultAdapterName, type AdapterName } from '../adapters/index.js';
 import { getDefaultChatModel, resolveChatModel, runChatCompletion, shortenChatModel } from './chatBackend.js';
+import { runPlanCommand, type PlanIO } from './planCommand.js';
 
 const CHAT_DIR = resolve(homedir(), '.openswarm', 'chat');
 
@@ -106,6 +107,7 @@ async function chat(session: Session, userMessage: string): Promise<void> {
 async function handleCommand(
   cmd: string,
   session: Session,
+  rl: readline.Interface,
 ): Promise<'exit' | 'handled'> {
   const [command, ...args] = cmd.slice(1).split(' ');
 
@@ -190,6 +192,24 @@ async function handleCommand(
       return 'handled';
     }
 
+    case 'plan': {
+      const goal = args.join(' ').trim();
+      if (!goal) {
+        console.log(`${DIM}Usage: /plan <goal>${RESET}`);
+        return 'handled';
+      }
+      const io: PlanIO = {
+        print: (line: string) => console.log(line),
+        confirm: async (p: string): Promise<'yes' | 'no' | 'edit'> => {
+          const a = (await rl.question(`${CYAN}${p}${RESET} `)).trim().toLowerCase();
+          return a === 'y' || a === 'yes' ? 'yes' : a === 'e' || a === 'edit' ? 'edit' : 'no';
+        },
+        promptText: async (p: string): Promise<string> => (await rl.question(`${CYAN}${p}${RESET} `)).trim(),
+      };
+      await runPlanCommand(goal, io, { projectPath: process.cwd() });
+      return 'handled';
+    }
+
     case 'info':
     case 'status':
       console.log(`${BOLD}Session:${RESET} ${session.id}`);
@@ -203,6 +223,7 @@ async function handleCommand(
     case '?':
       console.log(`
 ${BOLD}Commands:${RESET}
+  ${CYAN}/plan <goal>${RESET}      Decompose a goal & dispatch it to the loop
   ${CYAN}/clear${RESET}            Clear conversation
   ${CYAN}/save [name]${RESET}      Save session
   ${CYAN}/load [name]${RESET}      List/load sessions
@@ -279,7 +300,7 @@ async function main(): Promise<void> {
     }
 
     if (trimmed.startsWith('/')) {
-      if (await handleCommand(trimmed, session) === 'exit') break;
+      if (await handleCommand(trimmed, session, rl) === 'exit') break;
       continue;
     }
 
