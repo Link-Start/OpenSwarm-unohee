@@ -7,6 +7,7 @@ import type { WorkerResult, ReviewResult } from './agentPair.js';
 import { t, getPrompts } from '../locale/index.js';
 import type { AdapterName, ProcessContext } from '../adapters/types.js';
 import { getAdapter, spawnCli } from '../adapters/index.js';
+import { getMcpTools } from '../mcp/mcpClient.js';
 import { expandPath } from '../core/config.js';
 
 // Types
@@ -193,10 +194,12 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
       cwd,
       timeoutMs: options.timeoutMs ?? 180000, // 3 min default (review is faster)
       model: options.model,
-      maxTurns: options.maxTurns,
+      maxTurns: options.maxTurns ?? 15, // multi-turn so the reviewer can actually RUN ci checks
       reasoningEffort: options.reasoningEffort,
       processContext: options.processContext,
       systemPrompt: getPrompts().systemPrompt,
+      webTools: true,                 // docs lookup if the change touches an external API
+      mcpTools: await getMcpTools(),  // Linear etc. — destructive cmds still blocked by isCommandBlocked
     });
 
     // Parse result via adapter

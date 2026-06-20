@@ -171,10 +171,16 @@ APPROVABLE even if it could be improved further.
   last time, APPROVE — do not hunt for something new to block on.
 
 ## Instructions
-1. Check the changed files (use Read tool); run the worker's verification if provided
-2. Evaluate ONLY requirement fulfillment + blocking defects
-3. Put improvements in \`suggestions\`, real blockers in \`issues\`
-4. Make your decision — default to **approve** when the explicit requirements are met
+1. **Run the project's own checks FIRST (objective evidence beats reading code by eye).**
+   Use the bash tool. Find them in package.json \`scripts\` (typecheck/tsc, lint, test, build)
+   or pyproject.toml (ruff/mypy/pytest) — e.g. \`npm run typecheck && npm run lint && npm test\`,
+   or \`tsc --noEmit\`, or \`pytest\`. If a check passes and covers the change, that is strong
+   evidence to APPROVE. If it fails on the worker's change, that is a concrete blocking defect
+   (cite the exact error). If the repo has no such checks, say so and fall back to reading.
+2. Check the changed files (use Read tool); run the worker's verification if provided
+3. Evaluate ONLY requirement fulfillment + blocking defects — judged against the checks above
+4. Put improvements in \`suggestions\`, real blockers in \`issues\` (with the failing command/output)
+5. Make your decision — default to **approve** when the explicit requirements are met and the project's checks pass
 
 ## Output Format (IMPORTANT - must output in this format at the end)
 After review, output results in the following JSON format:

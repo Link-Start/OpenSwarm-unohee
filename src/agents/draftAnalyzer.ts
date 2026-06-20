@@ -301,14 +301,14 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
     const adapter = getAdapter();
     const raw = await spawnCli(adapter, {
       prompt,
-      cwd: '/tmp',  // 중립 디렉토리 (Planner와 동일)
-      timeoutMs: options.timeoutMs ?? 30000,
-      model,
-      maxTurns: 1,
+      cwd: options.projectPath,  // read the REAL codebase — the draft was guessing from the
+      timeoutMs: options.timeoutMs ?? 30000,  // registry + description only; with projectPath it
+      model,                     // can actually read_file/search_files to ground its analysis
+      maxTurns: 3,               // a few turns to inspect the relevant files (still fast)
       // codex-responses requires instructions — without a systemPrompt the call
       // 400s ("Instructions are required"), stdout is empty, and parsing yields
       // type=unknown every time (the long-standing "draft does nothing" bug).
-      systemPrompt: 'You are a fast code-change analyzer. Respond ONLY with the requested ```json``` block — no prose before or after.',
+      systemPrompt: 'You are a fast code-change analyzer. First use read_file/search_files to inspect the actual files the task touches (do not guess from the description alone), THEN respond with ONLY the requested ```json``` block — no prose around it.',
     });
 
     haikuResult = parseDraftResponse(raw.stdout);
