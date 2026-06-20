@@ -84,14 +84,15 @@ export async function getChangedFilesSinceSnapshot(
     committedOutput.split('\n').filter(Boolean).forEach(f => files.add(f));
     uncommittedOutput.split('\n').filter(Boolean).forEach(f => files.add(f));
     stagedOutput.split('\n').filter(Boolean).forEach(f => files.add(f));
-    // Exclude OpenSwarm's own worktree metadata (.openswarm/*: repo-snapshot.json,
-    // repo.graphql) — it isn't the worker's work, and including it made the
-    // reviewer see "only .openswarm metadata changed" and reject the task.
-    untrackedOutput.split('\n').filter(Boolean)
-      .filter(f => f !== '.openswarm' && !f.startsWith('.openswarm/'))
-      .forEach(f => files.add(f));
+    untrackedOutput.split('\n').filter(Boolean).forEach(f => files.add(f));
 
-    return Array.from(files);
+    // Exclude OpenSwarm's own worktree metadata EVERYWHERE (not just untracked):
+    // .openswarm/* (repo-snapshot.json, repo.graphql) can be tracked/committed too,
+    // and it's never the worker's work. Including it made the reviewer see "only
+    // .openswarm metadata changed" and reject — and inflated filesChanged so a
+    // no-edit run looked like a real change (INT-1630).
+    const isMeta = (f: string) => f === '.openswarm' || f.startsWith('.openswarm/');
+    return Array.from(files).filter((f) => !isMeta(f));
   } catch (error) {
     console.error('[GitTracker] getChangedFilesSinceSnapshot error:', error);
     return [];
