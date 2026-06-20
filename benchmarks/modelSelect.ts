@@ -53,6 +53,8 @@ interface RunResult {
   completionTokens: number;
   costUsd: number;
   durationMs: number;
+  noEdit: boolean;          // worker made zero edits (the "no file changes" failure mode)
+  readLoopNudges: number;   // how many times the read-loop guard had to fire
 }
 
 interface ModelAgg {
@@ -64,6 +66,8 @@ interface ModelAgg {
   costPerPass: number;       // 성공당 비용 (핵심 효율 지표)
   avgToolCalls: number;
   avgDurationMs: number;
+  noEditRate: number;        // fraction of runs where the worker made zero edits
+  avgReadLoopNudges: number; // how often the read-loop guard had to intervene
 }
 
 // ---- OpenRouter 가격 카탈로그 ----
@@ -136,6 +140,9 @@ async function runOne(
 
   // 로그에서 메트릭 추출
   const toolCalls = logs.filter((l) => l.includes('🔧')).length;
+  const editCalls = logs.filter((l) => l.includes('🔧') && /edit_file|write_file/.test(l)).length;
+  const noEdit = editCalls === 0;
+  const readLoopNudges = logs.filter((l) => l.includes('Read-loop guard')).length;
   const apiCalls = logs.filter((l) => l.includes('API call #')).length;
   const tokenLine = logs.find((l) => /\d+ tokens/.test(l)) ?? '';
   const totalTokens = Number(tokenLine.match(/(\d+) tokens/)?.[1] ?? 0);
@@ -153,6 +160,7 @@ async function runOne(
     model, taskId: task.id, rep,
     passed: verdict.passed, reason: verdict.reason,
     toolCalls, apiCalls, promptTokens, completionTokens, costUsd, durationMs,
+    noEdit, readLoopNudges,
   };
 }
 
@@ -178,6 +186,8 @@ function aggregate(results: RunResult[]): ModelAgg[] {
       costPerPass: passes > 0 ? totalCost / passes : Infinity,
       avgToolCalls: rs.reduce((s, r) => s + r.toolCalls, 0) / rs.length,
       avgDurationMs: rs.reduce((s, r) => s + r.durationMs, 0) / rs.length,
+      noEditRate: rs.filter((r) => r.noEdit).length / rs.length,
+      avgReadLoopNudges: rs.reduce((s, r) => s + r.readLoopNudges, 0) / rs.length,
     });
   }
 
