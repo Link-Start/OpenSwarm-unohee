@@ -284,7 +284,10 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
   }
 
   // 3. Fast model draft analysis (~3s)
-  const model = options.model ?? 'gpt-5-codex';
+  // gpt-5-codex puts its output in the reasoning channel and emits little/no
+  // output_text, so the JSON block never arrives → type=unknown. gpt-5.4-mini
+  // answers in output_text, so the ```json``` block is actually parseable.
+  const model = options.model ?? 'gpt-5.4-mini';
   const prompt = buildDraftPrompt(options, codeContext, impactAnalysis);
 
   let haikuResult: Partial<DraftAnalysis> = {

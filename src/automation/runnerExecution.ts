@@ -359,7 +359,8 @@ export async function createSubIssuesWithDependencies(
     totalMinutes: String(totalEstimatedMinutes),
   }));
 
-  broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'complete' } });
+  broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'complete',
+    summary: createdSubIssues.length > 0 ? `${createdSubIssues.length} sub-issues` : 'no decomposition' } });
   // Log each sub-issue as a log line for the dashboard
   for (const s of createdSubIssues) {
     broadcastEvent({ type: 'log', data: { taskId, stage: 'decompose', line: `↳ ${s.identifier}: ${s.title}` } });
@@ -621,7 +622,9 @@ export async function executePipeline(
         onLog: (line) => broadcastEvent({ type: 'log', data: { taskId, stage: 'draft', line } }),
       });
 
-      broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'draft', status: 'complete' } });
+      broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'draft', status: 'complete',
+        summary: `type=${draftResult.taskType}, ${draftResult.relevantFiles.length} files`,
+        filesChangedCount: draftResult.relevantFiles.length } });
       console.log(`[AutonomousRunner] Draft: type=${draftResult.taskType}, files=${draftResult.relevantFiles.length}, ${draftResult.durationMs}ms`);
     } catch (err) {
       console.warn('[AutonomousRunner] Draft analysis failed (non-blocking):', err);
