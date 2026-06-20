@@ -14,6 +14,31 @@ import { isMcpTool, callMcpTool } from '../mcp/mcpClient.js';
 
 const execFileAsync = promisify(execFile);
 
+// Anti-shortcut / fake-data guard — ports the user's fake-data-guard.sh PostToolUse
+// hook into the agentic loop. After a write/edit we scan the new content for shortcut
+// smells and append a warning to the tool result, so the worker self-corrects on its
+// next turn (the systemPrompt already forbids these; this catches them in the act).
+// Heuristic + best-effort; an `intentional-random` marker suppresses the random/faker flag.
+function checkAntiShortcut(content: string): string {
+  if (!content) return '';
+  const warnings: string[] = [];
+  if (/\b(faker|Faker\(\)|np\.random|numpy\.random|random\.(rand|random|randint|choice|uniform))\b/.test(content)
+      && !/intentional[-_]?random|np\.random\.seed|test fixture/i.test(content)) {
+    warnings.push('possible FAKE DATA (random/faker) — use real data, or add `# intentional-random` if deliberate');
+  }
+  if (/except\s*[\w.]*\s*:\s*(\n\s*)?pass\b/.test(content)) {
+    warnings.push('HIDDEN FAILURE (`except: pass`) — handle or log the error, never swallow it');
+  }
+  if (/simulated\s+(response|output|api|data)|mock(ed)?\s+(response|api)\s*=/i.test(content)) {
+    warnings.push('possible FAKE EXECUTION (simulated/mocked output passed off as real)');
+  }
+  if (/\b(pdb\.set_trace\(\)|debugger;)|console\.log\(['"]debug/i.test(content)) {
+    warnings.push('DEBUG LEFTOVER — remove before finishing');
+  }
+  if (warnings.length === 0) return '';
+  return `\n\n⚠️ [anti-shortcut guard] Fix these in what you just wrote before finishing:\n- ${warnings.join('\n- ')}`;
+}
+
 // Worker bash often calls `python`, but many machines only have `python3`
 // (e.g. Homebrew). Inject a shim dir at the front of PATH so `python` resolves
 // to `python3` — otherwise verification scripts fail with "command not found"
@@ -307,7 +332,7 @@ export async function executeTool(
         await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, args.content, 'utf-8');
         invalidateCache(cache, filePath);
-        return { tool_call_id: callId, content: `Written: ${filePath}`, is_error: false };
+        return { tool_call_id: callId, content: `Written: ${filePath}${checkAntiShortcut(args.content)}`, is_error: false };
       }
 
       case 'edit_file': {
@@ -342,7 +367,7 @@ export async function executeTool(
         const snippet = newLines.slice(from, to).map((l, i) => `${from + i + 1}\t${l}`).join('\n');
         return {
           tool_call_id: callId,
-          content: `Edited: ${filePath}\nResulting region:\n${snippet}`,
+          content: `Edited: ${filePath}\nResulting region:\n${snippet}${checkAntiShortcut(args.new_string)}`,
           is_error: false,
         };
       }
