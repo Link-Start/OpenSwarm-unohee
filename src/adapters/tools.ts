@@ -14,6 +14,25 @@ import { isMcpTool, callMcpTool } from '../mcp/mcpClient.js';
 
 const execFileAsync = promisify(execFile);
 
+// Worker bash often calls `python`, but many machines only have `python3`
+// (e.g. Homebrew). Inject a shim dir at the front of PATH so `python` resolves
+// to `python3` — otherwise verification scripts fail with "command not found"
+// and the reviewer rejects the task forever (this blocked the autonomous
+// backlog: INT-1616 looped on "no verification output"). Created once, best-effort.
+let pythonShimDir: string | null = null;
+async function ensurePythonShimDir(): Promise<string | null> {
+  if (pythonShimDir !== null) return pythonShimDir || null;
+  const dir = path.join(process.env.HOME ?? '', '.openswarm', 'shim');
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'python'), '#!/bin/sh\nexec python3 "$@"\n', { mode: 0o755 });
+    pythonShimDir = dir;
+  } catch {
+    pythonShimDir = ''; // mark attempted; don't retry every bash call
+  }
+  return pythonShimDir || null;
+}
+
 // ============ 도구 정의 (OpenAI function calling 포맷) ============
 
 export interface ToolDefinition {
@@ -354,11 +373,15 @@ export async function executeTool(
           return { tool_call_id: callId, content: `BLOCKED: destructive command not allowed: ${command}`, is_error: true };
         }
         try {
+          const shimDir = await ensurePythonShimDir();
+          const pathWithShim = shimDir
+            ? `${shimDir}${path.delimiter}${process.env.PATH ?? ''}`
+            : process.env.PATH;
           const { stdout, stderr } = await execFileAsync('bash', ['-c', command], {
             cwd,
             timeout: execOptions?.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS,
             maxBuffer: 1024 * 512,
-            env: process.env,
+            env: { ...process.env, PATH: pathWithShim },
           });
           const output = stdout + (stderr ? `\n[stderr] ${stderr}` : '');
           // 출력이 너무 길면 잘라냄
