@@ -129,6 +129,14 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
         }
       } else if (parsedResult.filesChanged.length === 0) {
         console.log('[Worker] No file changes detected by Git or LLM');
+        // Zero edits = task not done. Force failure so the pipeline retries/blocks
+        // instead of handing an empty result to the reviewer (which just REVISEs
+        // forever). INT-1630 looped 60× this way, starving the rest of the backlog.
+        // (SWE-agent no-edit guard pattern.)
+        if (!parsedResult.haltReason) {
+          parsedResult.success = false;
+          parsedResult.haltReason = 'No file changes were made — task not implemented';
+        }
       }
     }
 
