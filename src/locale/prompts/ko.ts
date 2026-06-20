@@ -294,15 +294,20 @@ ${draftSection}${kgSection}
 - true: 작업이 ${targetMinutes}분 초과 예상, 분해 필요
 - false: 작업이 ${targetMinutes}분 이내 예상, 분해 불필요
 
-**분해 불필요 시**:
+**분해 불필요 시** — 그래도 워커를 위한 실행 계획을 반드시 생성하라:
 \`\`\`json
 {
   "needsDecomposition": false,
   "reason": "단일 API 수정으로 15분 내 완료 가능",
   "subTasks": [],
-  "totalEstimatedMinutes": 15
+  "totalEstimatedMinutes": 15,
+  "executionPlan": "워커가 따라야 할 구체적이고 순서 있는 단계 (예: 1. X 열기, 2. Y를 Z로 변경, 3. 테스트 실행). 워커가 레포를 다시 탐색하지 않아도 될 만큼 구체적으로.",
+  "relevantFiles": ["path/to/file1.ts", "path/to/file2.py"],
+  "completionCriteria": "'완료'의 명시적이고 검증 가능한 기준 (예: '엔드포인트가 새 필드와 함께 200 반환; 기존 테스트 통과'). 리뷰어는 정확히 이것으로 판단한다 — 작업이 실제로 요구하는 것만, 과잉(gold-plating) 금지."
 }
 \`\`\`
+
+**executionPlan / relevantFiles / completionCriteria는 분해 여부와 무관하게 매 응답에 필수다.** 이것이 워커가 실행할 것이고 리뷰어가 점검할 것이므로, 작업의 실제 요구사항과 정확히 일치해야 한다 — 그 이상도 이하도 아니게.
 
 ## Important
 - 코드를 작성하지 마라, 분석만 하라

@@ -50,6 +50,12 @@ export interface PlannerResult {
   reason?: string;
   subTasks: SubTask[];
   totalEstimatedMinutes: number;
+  // Execution plan handed to the worker even when NOT decomposing — concrete
+  // steps + likely files cut the worker's re-discovery turns, and an explicit
+  // completion bar is shared with the reviewer (removes worker/reviewer asymmetry).
+  executionPlan?: string;
+  completionCriteria?: string;
+  relevantFiles?: string[];
   error?: string;
   costInfo?: CostInfo;
 }
@@ -181,6 +187,9 @@ function parsePlannerOutput(output: string, originalTitle: string): PlannerResul
             reason: parsed.reason as string | undefined,
             subTasks: Array.isArray(parsed.subTasks) ? parsed.subTasks as SubTask[] : [],
             totalEstimatedMinutes: (parsed.totalEstimatedMinutes as number) || 0,
+            executionPlan: parsed.executionPlan as string | undefined,
+            completionCriteria: parsed.completionCriteria as string | undefined,
+            relevantFiles: Array.isArray(parsed.relevantFiles) ? parsed.relevantFiles as string[] : undefined,
           };
         }
       } catch { /* not valid JSON, try other methods */ }
@@ -233,6 +242,9 @@ function parsePlanResult(resultText: string, originalTitle: string): PlannerResu
     reason: parsed.reason as string | undefined,
     subTasks: Array.isArray(parsed.subTasks) ? parsed.subTasks as SubTask[] : [],
     totalEstimatedMinutes: (parsed.totalEstimatedMinutes as number) || 0,
+    executionPlan: parsed.executionPlan as string | undefined,
+    completionCriteria: parsed.completionCriteria as string | undefined,
+    relevantFiles: Array.isArray(parsed.relevantFiles) ? parsed.relevantFiles as string[] : undefined,
   };
 }
 
@@ -263,6 +275,9 @@ function parseDirectJson(text: string, startIdx: number, originalTitle: string):
       reason: parsed.reason,
       subTasks: Array.isArray(parsed.subTasks) ? parsed.subTasks : [],
       totalEstimatedMinutes: parsed.totalEstimatedMinutes || 0,
+      executionPlan: parsed.executionPlan,
+      completionCriteria: parsed.completionCriteria,
+      relevantFiles: Array.isArray(parsed.relevantFiles) ? parsed.relevantFiles : undefined,
     };
   } catch {
     return extractFromText(text, originalTitle);

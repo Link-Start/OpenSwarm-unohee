@@ -551,8 +551,24 @@ export async function decomposeTask(
     // it. Without this, "No Decomposition" sent the worker in blind → reviewer
     // REJECT (e.g. INT-1615). This is the missing half of "planner plans, worker
     // executes the plan".
-    if (result.reason && result.reason.trim()) {
-      task.description = `## Plan (from Planner)\n${result.reason.trim()}\n\n## Task\n${task.description || ''}`;
+    // Hand the planner's execution plan to the worker. Concrete steps + likely files
+    // cut the worker's re-discovery turns; the explicit completion bar is shared with
+    // the reviewer (both read this same task.description → no worker/reviewer asymmetry).
+    const planParts: string[] = [];
+    if (result.executionPlan?.trim()) {
+      planParts.push(`### Execution Plan\n${result.executionPlan.trim()}`);
+    }
+    if (result.relevantFiles?.length) {
+      planParts.push(`### Likely Files (start here — avoid re-discovery)\n${result.relevantFiles.map(f => `- ${f}`).join('\n')}`);
+    }
+    if (result.completionCriteria?.trim()) {
+      planParts.push(`### Completion Criteria (the reviewer judges against THESE — meet them and you're done)\n${result.completionCriteria.trim()}`);
+    }
+    if (planParts.length === 0 && result.reason?.trim()) {
+      planParts.push(result.reason.trim()); // fallback to old behavior (reason only)
+    }
+    if (planParts.length > 0) {
+      task.description = `## Plan (from Planner)\n${planParts.join('\n\n')}\n\n## Task\n${task.description || ''}`;
       console.log('[AutonomousRunner] Plan transferred to worker prompt (no-decomp)');
     }
     return 'no-decomp';

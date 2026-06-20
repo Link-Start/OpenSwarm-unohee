@@ -295,15 +295,20 @@ Output the analysis results in the following JSON format:
 - true: Task expected to exceed ${targetMinutes} minutes, decomposition needed
 - false: Task expected within ${targetMinutes} minutes, no decomposition needed
 
-**When no decomposition needed**:
+**When no decomposition needed** — you MUST still produce an execution plan for the worker:
 \`\`\`json
 {
   "needsDecomposition": false,
   "reason": "Single API modification, completable within 15 minutes",
   "subTasks": [],
-  "totalEstimatedMinutes": 15
+  "totalEstimatedMinutes": 15,
+  "executionPlan": "Concrete ordered steps the worker should follow (e.g. 1. open X, 2. change Y->Z, 3. run the test). Specific enough that the worker need not re-explore the repo.",
+  "relevantFiles": ["path/to/file1.ts", "path/to/file2.py"],
+  "completionCriteria": "The explicit, checkable bar for 'done' (e.g. 'endpoint returns 200 with the new field; existing tests pass'). The reviewer judges against EXACTLY this — limit it to what the task actually requires, no gold-plating."
 }
 \`\`\`
+
+**executionPlan / relevantFiles / completionCriteria are REQUIRED on every response**, decomposed or not. They are what the worker executes and what the reviewer checks, so they must match the task's real requirements — nothing more, nothing less.
 
 ## Important
 - Do NOT write code, only analyze
