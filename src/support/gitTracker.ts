@@ -71,12 +71,25 @@ export async function getChangedFilesSinceSnapshot(
     const stagedOutput = await runGitCommand(projectPath, [
       'diff', '--name-only', '--cached'
     ]);
+    // Untracked new files — `git diff` only reports tracked files, so a worker
+    // that CREATES a new file (e.g. a verification script) is invisible to the
+    // reviewer, which then rejects with "no verification file / untracked"
+    // forever. This blocks every new-file task (INT-1616 looped on exactly this).
+    const untrackedOutput = await runGitCommand(projectPath, [
+      'ls-files', '--others', '--exclude-standard'
+    ]);
 
     const files = new Set<string>();
 
     committedOutput.split('\n').filter(Boolean).forEach(f => files.add(f));
     uncommittedOutput.split('\n').filter(Boolean).forEach(f => files.add(f));
     stagedOutput.split('\n').filter(Boolean).forEach(f => files.add(f));
+    // Exclude OpenSwarm's own worktree metadata (.openswarm/*: repo-snapshot.json,
+    // repo.graphql) — it isn't the worker's work, and including it made the
+    // reviewer see "only .openswarm metadata changed" and reject the task.
+    untrackedOutput.split('\n').filter(Boolean)
+      .filter(f => f !== '.openswarm' && !f.startsWith('.openswarm/'))
+      .forEach(f => files.add(f));
 
     return Array.from(files);
   } catch (error) {

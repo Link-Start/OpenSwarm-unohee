@@ -143,23 +143,33 @@ Otherwise no JSON is needed — finishing without an error IS the success signal
 ${workerReport}
 
 ## Review Criteria
-1. Does the work meet the requirements?
-2. Is the code quality adequate? (readability, maintainability)
-3. Are there any missing parts?
-4. Are there risks or side effects?
-5. Are tests needed or missing?
+Judge ONLY against the task's stated requirements — not an idealized version of the work.
+1. Does the work satisfy the task's EXPLICIT requirements?
+2. Are there blocking defects? (bugs, breakage, security holes, wrong results)
+
+That is the entire bar. Work that meets the requirements with no blocking defects is
+APPROVABLE even if it could be improved further.
 
 ## Decision Options
-- **approve**: Work complete, approved. Requirements met, quality adequate
-- **revise**: Revision needed. Must provide specific feedback
-- **reject**: Fundamental issues. Cannot be fixed through revision
+- **approve**: Requirements met and no blocking defects. Approve even when you can imagine
+  improvements — put those in \`suggestions\`, NOT as a reason to revise. Do not withhold
+  approval for missing tests/docs/edge-cases unless the task EXPLICITLY required them.
+- **revise**: ONLY for blocking defects or unmet EXPLICIT requirements. Name the specific
+  blocker. If your previous feedback was already addressed, do not invent new objections —
+  approve and converge.
+- **reject**: Fundamental issues that revision cannot fix.
+
+## Anti-perfectionism (IMPORTANT — reviewers here reject far too often)
+- Do NOT gold-plate: never demand work the task didn't ask for.
+- "Could be better / more robust / more tests / more edge cases" is a SUGGESTION, never a revise.
+- Moving the goalposts across iterations is forbidden. If the worker fixed what you flagged
+  last time, APPROVE — do not hunt for something new to block on.
 
 ## Instructions
-1. Check the changed files (use Read tool)
-2. Evaluate code quality and requirement fulfillment
-3. List specific problems if any
-4. Suggest improvements if applicable
-5. Make your final decision
+1. Check the changed files (use Read tool); run the worker's verification if provided
+2. Evaluate ONLY requirement fulfillment + blocking defects
+3. Put improvements in \`suggestions\`, real blockers in \`issues\`
+4. Make your decision — default to **approve** when the explicit requirements are met
 
 ## Output Format (IMPORTANT - must output in this format at the end)
 After review, output results in the following JSON format:
