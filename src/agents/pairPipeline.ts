@@ -497,11 +497,15 @@ export class PairPipeline extends EventEmitter {
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
             projectPath: context.projectPath,
-            previousFeedback: useFreshContext
-              ? undefined // Fresh context: no previous feedback
-              : (context.reviewResult
-                  ? reviewerAgent.buildRevisionPrompt(context.reviewResult)
-                  : undefined),
+            // Even on fresh context, KEEP the reviewer's feedback: it's the task
+            // requirement (e.g. "wire it into the heartbeat / add the call site"),
+            // not conversational pollution. Dropping it made the worker repeat the
+            // exact same partial impl forever — "not wired / no call site" REVISE on
+            // every retry. Fresh context still clears the worker's own chat history
+            // (consumeFreshContext above); only the reviewer's task signal survives.
+            previousFeedback: context.reviewResult
+              ? reviewerAgent.buildRevisionPrompt(context.reviewResult)
+              : undefined,
             timeoutMs: this.config.roles?.worker?.timeoutMs ?? 0,
             // Use stageModel so a matched job profile actually overrides the model
             // (previously this read config.roles directly, so profiles did nothing).
