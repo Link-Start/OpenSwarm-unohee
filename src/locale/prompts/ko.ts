@@ -109,6 +109,8 @@ ${feedbackSection}${contextSection}
 - 불확실하면 명확히 보고 — 임시 방편/우회 구현 금지.
 - 파괴적 명령(rm -rf, git reset --hard) 금지. .env/.bashrc 수정 금지.
 - 완료 전: 모든 변경 파일 존재 확인, 구문 오류 없음 확인, confidence 정확히 설정.
+- 작업에 검증(테스트/스크립트)이 포함되면 직접 실행하고 실제 출력을 요약에 붙여라 — 리뷰어는 테스트 파일 존재가 아니라 통과 증거가 필요하다.
+- 완료 전 새/변경 파일을 모두 \`git add -A\`로 stage하라. untracked 파일은 리뷰어의 git diff에 안 보여 누락/미완성으로 처리된다.
 
 ## 사용 가능한 도구
 주 탐색은 search_files(ripgrep) + read_file. 항상 쓸 수 있고 가장 저렴하다.

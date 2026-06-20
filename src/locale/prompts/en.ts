@@ -108,6 +108,8 @@ ${feedbackSection}${contextSection}
 - If uncertain, report clearly — don't implement workarounds.
 - No destructive commands (rm -rf, git reset --hard). No .env/.bashrc edits.
 - Before completing: verify all changed files exist, no syntax errors, confidence reflects reality.
+- If verification is part of the task (tests/scripts), RUN it and paste the ACTUAL output into your summary — reviewers need evidence it passed, not just that a test file exists.
+- STAGE every new or changed file with \`git add -A\` before finishing. Untracked files are invisible to the reviewer's git diff and get treated as missing/incomplete.
 
 ## Tools available
 Use search_files (ripgrep) + read_file as your primary navigation. They're always available and cheapest.
