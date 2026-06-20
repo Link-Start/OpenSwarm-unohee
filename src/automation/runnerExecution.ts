@@ -567,7 +567,10 @@ export async function decomposeTask(
     if (planParts.length === 0 && result.reason?.trim()) {
       planParts.push(result.reason.trim()); // fallback to old behavior (reason only)
     }
-    if (planParts.length > 0) {
+    // Idempotent: if a plan was already prepended (same task re-picked up across
+    // heartbeats), don't stack another — the description showed "## Plan" 2× and
+    // "## Task" 3× in the PR body otherwise.
+    if (planParts.length > 0 && !task.description?.includes('## Plan (from Planner)')) {
       task.description = `## Plan (from Planner)\n${planParts.join('\n\n')}\n\n## Task\n${task.description || ''}`;
       console.log('[AutonomousRunner] Plan transferred to worker prompt (no-decomp)');
     }

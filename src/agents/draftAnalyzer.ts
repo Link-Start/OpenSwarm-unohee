@@ -302,6 +302,10 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
       timeoutMs: options.timeoutMs ?? 30000,
       model,
       maxTurns: 1,
+      // codex-responses requires instructions — without a systemPrompt the call
+      // 400s ("Instructions are required"), stdout is empty, and parsing yields
+      // type=unknown every time (the long-standing "draft does nothing" bug).
+      systemPrompt: 'You are a fast code-change analyzer. Respond ONLY with the requested ```json``` block — no prose before or after.',
     });
 
     haikuResult = parseDraftResponse(raw.stdout);
