@@ -207,6 +207,10 @@ export class ConflictResolver {
             projectPath,
             model: this.config.workerModel,
             timeoutMs: this.config.workerTimeoutMs || 300_000,
+            // Conflict resolution REQUIRES edits (remove <<<<<<< markers, merge both sides). Without
+            // the no-edit nudge a read-heavy model (qwen) ends with analysis only → "worker failed -
+            // undefined" and the conflict never resolves (#14). pairPipeline's worker already does this.
+            nudgeMaxOnNoEdit: 3,
           });
 
           if (!workerResult.success) {
