@@ -9,6 +9,7 @@ import { t, getPrompts } from '../locale/index.js';
 import type { WorkerContext } from '../locale/types.js';
 import type { AdapterName, ProcessContext } from '../adapters/types.js';
 import { getAdapter, spawnCli } from '../adapters/index.js';
+import { consumeTimeoutHandoff } from '../adapters/agenticLoop.js';
 import { expandPath } from '../core/config.js';
 
 // Types
@@ -73,8 +74,19 @@ function buildWorkerPrompt(options: WorkerOptions): string {
  * Integrates Git-based file change tracking (Aider style)
  */
 export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
-  const prompt = buildWorkerPrompt(options);
   const cwd = expandPath(options.projectPath);
+  // 이전 시도가 타임아웃으로 끊겼다면, worktree에 남은 이어받기 핸드오프를 읽어(소비) 피드백에
+  // 합친다. 재탐색 낭비를 줄이되 풀 대화를 이어붙이지는 않는다(루프 방지).
+  const handoff = consumeTimeoutHandoff(cwd);
+  if (handoff) {
+    console.log('[Worker] Resuming from a timed-out attempt (handoff found)');
+    options.onLog?.('🔁 Resuming from timed-out attempt — picking up prior progress');
+  }
+  const prompt = buildWorkerPrompt(
+    handoff
+      ? { ...options, previousFeedback: [handoff, options.previousFeedback].filter(Boolean).join('\n\n') }
+      : options,
+  );
   const adapter = getAdapter(options.adapterName);
 
   // Git snapshot (pre-work state)

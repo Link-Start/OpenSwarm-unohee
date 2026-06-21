@@ -6,9 +6,62 @@
 //          VEGA token_count.py 패턴 이식 — 토큰 기반 히스토리 압축.
 // ============================================
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { TOOL_DEFINITIONS, executeToolCalls, createReadCache, type ToolCall, type ToolResult, type ToolDefinition } from './tools.js';
 import { WEB_TOOL_DEFINITIONS } from './webTools.js';
 import type { CliRunResult } from './types.js';
+
+// ============ 타임아웃 이어받기 핸드오프 ============
+// 에이전틱 루프가 timeoutMs로 끊겨도 그 시도의 작업 기억(읽은 파일·편집한 파일·마지막
+// 의도)을 그냥 휘발시키지 않는다. worktree(.openswarm/)에 압축 요약을 남기면, 같은
+// worktree를 재사용하는 다음 재시도 worker가 이를 읽어 처음부터 재탐색하지 않고 이어서
+// 작업한다. 풀 대화를 통째로 이어붙이면 과거에 무한루프를 유발했으므로(pairPipeline의
+// fresh-context 결정 참고), 날것의 messages가 아니라 짧은 핸드오프만 전달한다.
+const HANDOFF_REL = join('.openswarm', 'timeout-handoff.md');
+
+/** 타임아웃 시 worktree에 이어받기 핸드오프를 기록 (best-effort — 실패해도 루프를 막지 않음). */
+export function writeTimeoutHandoff(
+  cwd: string,
+  info: { editedFiles: Set<string>; readFiles: Set<string>; lastReasoning: string; turn: number },
+): void {
+  // 남길 게 없으면(편집도 의도도 없음) 핸드오프 자체를 만들지 않는다.
+  if (info.editedFiles.size === 0 && !info.lastReasoning) return;
+  const lines = [
+    '## Continuation handoff — the previous attempt TIMED OUT mid-task',
+    'Resume from where it stopped; do NOT restart from scratch. Any edits below are already on disk.',
+    '',
+  ];
+  if (info.editedFiles.size) {
+    lines.push(`Files already edited (on disk — build on these, do not redo): ${[...info.editedFiles].join(', ')}`);
+  }
+  if (info.readFiles.size) {
+    lines.push(`Files already explored (skip re-reading unless verifying): ${[...info.readFiles].slice(0, 25).join(', ')}`);
+  }
+  if (info.lastReasoning) {
+    lines.push(`Last stated intent before timeout: ${info.lastReasoning.replace(/\s+/g, ' ').slice(0, 800)}`);
+  }
+  lines.push('', `Stopped after ${info.turn} turns. Finish the remaining work, then conclude.`);
+  try {
+    mkdirSync(join(cwd, '.openswarm'), { recursive: true });
+    writeFileSync(join(cwd, HANDOFF_REL), lines.join('\n'), 'utf8');
+  } catch {
+    /* 핸드오프는 최적화일 뿐 — 기록 실패가 작업을 막아선 안 된다 */
+  }
+}
+
+/** 핸드오프를 읽고 즉시 삭제(소비) — stale 핸드오프가 무관한 재시도로 새지 않도록 한 번만 쓴다. */
+export function consumeTimeoutHandoff(cwd: string): string | undefined {
+  const p = join(cwd, HANDOFF_REL);
+  try {
+    if (!existsSync(p)) return undefined;
+    const content = readFileSync(p, 'utf8');
+    unlinkSync(p);
+    return content.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // ============ 토큰 카운팅 (VEGA token_count.py 이식) ============
 
@@ -203,6 +256,10 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   const readCache = createReadCache(); // 루프 단위 read 캐시 (중복 read 차단)
   let toolCallCount = 0;
   let editToolCount = 0; // edit_file/write_file 호출 수 (no-edit 가드용)
+  // 타임아웃 이어받기 핸드오프용 — 손댄 파일/마지막 의도 추적.
+  let lastReasoning = '';
+  const editedFiles = new Set<string>();
+  const readFiles = new Set<string>();
   // 진전 정체 감지: 이번 턴의 도구 호출이 모두 이전과 동일(name+args)하면 새 정보·변경
   // 없는 반복이다. N턴 연속이면 루프로 보고 조기 종료한다 — 고정 turn 한도(작업 제한)가
   // 아니라 진전 기반 중단. maxTurns는 비상 천장으로만 남는다.
@@ -230,6 +287,8 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     // 타임아웃 체크
     if (Date.now() > deadline) {
       onLog?.(`⏰ Agentic loop timeout after ${turn} turns`);
+      // 작업 기억을 휘발시키지 않고 worktree에 남긴다 → 다음 재시도 worker가 이어받는다.
+      writeTimeoutHandoff(cwd, { editedFiles, readFiles, lastReasoning, turn });
       break;
     }
 
@@ -305,6 +364,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     // worker가 무슨 의도로 그 도구를 호출하는지 알 수 없어, 엉뚱한 작업의 원인을
     // 진단할 수 없다(= "응답 토큰이 안 나오고 도구만 보인다"는 증상의 정체).
     if (assistantMsg.content && assistantMsg.content.trim()) {
+      lastReasoning = assistantMsg.content.trim(); // 타임아웃 핸드오프용 — 직전 의도 보존
       onLog?.(`  💭 ${assistantMsg.content.trim().replace(/\s+/g, ' ').slice(0, 400)}`);
     }
     // 어시스턴트 메시지를 히스토리에 추가 (tool_calls 포함)
@@ -341,6 +401,21 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     editToolCount += toolCalls.filter((tc, i) =>
       (tc.function.name === 'edit_file' || tc.function.name === 'write_file') && !results[i]?.is_error,
     ).length;
+
+    // 타임아웃 핸드오프용 — 성공한 read/edit의 파일 경로를 모은다.
+    toolCalls.forEach((tc, i) => {
+      if (results[i]?.is_error) return;
+      let path: string | undefined;
+      try {
+        const a = JSON.parse(tc.function.arguments) as { path?: string; file_path?: string };
+        path = a.path ?? a.file_path;
+      } catch {
+        return;
+      }
+      if (!path) return;
+      if (tc.function.name === 'edit_file' || tc.function.name === 'write_file') editedFiles.add(path);
+      else if (tc.function.name === 'read_file') readFiles.add(path);
+    });
 
     // Read-loop guard: the model is burning turns reading/searching but has made NO
     // edits yet. The no-edit-on-finish guard (line ~278) only fires when the model
