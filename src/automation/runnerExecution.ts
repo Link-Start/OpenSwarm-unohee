@@ -854,9 +854,11 @@ export async function executePipeline(
 
 function getEnabledStages(roles?: DefaultRolesConfig): PipelineStage[] {
   const stages: PipelineStage[] = [];
+  // Order matches actual execution: worker → tester → reviewer (tester runs before the
+  // reviewer so the reviewer judges code + test results together).
   if (roles?.worker?.enabled !== false) stages.push('worker');
-  if (roles?.reviewer?.enabled !== false) stages.push('reviewer');
   if (roles?.tester?.enabled) stages.push('tester');
+  if (roles?.reviewer?.enabled !== false) stages.push('reviewer');
   if (roles?.documenter?.enabled) stages.push('documenter');
   return stages;
 }
