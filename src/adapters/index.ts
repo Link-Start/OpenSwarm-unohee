@@ -21,6 +21,7 @@ export { GptCliAdapter } from './gpt.js';
 export { LocalModelAdapter } from './local.js';
 export { LmStudioAdapter } from './lmstudio.js';
 export { OpenRouterCliAdapter } from './openrouter.js';
+export { ClaudeCliAdapter } from './claude.js';
 export { registerProcess, getProcess, getAllProcesses, killProcess, startHealthChecker, stopHealthChecker } from './processRegistry.js';
 
 import { CodexCliAdapter } from './codex.js';
@@ -29,6 +30,7 @@ import { GptCliAdapter } from './gpt.js';
 import { LocalModelAdapter } from './local.js';
 import { LmStudioAdapter } from './lmstudio.js';
 import { OpenRouterCliAdapter } from './openrouter.js';
+import { ClaudeCliAdapter } from './claude.js';
 import type { AdapterName, CliAdapter } from './types.js';
 
 const adapters: Record<string, CliAdapter> = {
@@ -38,6 +40,7 @@ const adapters: Record<string, CliAdapter> = {
   local: new LocalModelAdapter(),
   lmstudio: new LmStudioAdapter(),
   openrouter: new OpenRouterCliAdapter(),
+  claude: new ClaudeCliAdapter(),
 };
 
 let defaultAdapter: AdapterName = 'codex';

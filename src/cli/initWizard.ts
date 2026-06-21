@@ -15,7 +15,7 @@ import { writeEnvVars } from '../core/envFile.js';
 import { generateSampleConfig } from '../core/config.js';
 import { AuthProfileStore } from '../auth/index.js';
 
-type ProviderId = 'codex-responses' | 'openrouter' | 'gpt' | 'lmstudio' | 'local' | 'codex';
+type ProviderId = 'codex-responses' | 'openrouter' | 'gpt' | 'lmstudio' | 'local' | 'codex' | 'claude';
 type TaskBackend = 'linear' | 'local';
 type NotifyChannel = 'none' | 'discord' | 'slack' | 'telegram' | 'webhook';
 
@@ -26,6 +26,7 @@ const PROVIDER_OPTIONS: ChoiceOption<ProviderId>[] = [
   { label: 'lmstudio', value: 'lmstudio', hint: 'Local LM Studio server (no account)' },
   { label: 'local', value: 'local', hint: 'Local Ollama models (no account)' },
   { label: 'codex', value: 'codex', hint: 'External codex CLI (delegated)' },
+  { label: 'claude', value: 'claude', hint: 'Claude Code CLI (`claude -p` headless — uses your Claude subscription)' },
 ];
 
 const TASK_OPTIONS: ChoiceOption<TaskBackend>[] = [

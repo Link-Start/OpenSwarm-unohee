@@ -1,8 +1,10 @@
 // ============================================
-// OpenSwarm - Claude CLI Adapter
-// Wraps `claude -p` for agent execution
+// OpenSwarm - Claude CLI Adapter ("claude -p" proxy mode)
+// Wraps the Claude Code headless CLI (`claude -p`) as a model backend, so OpenSwarm can route
+// worker/reviewer/chat through a logged-in Claude Code subscription. Restored after the v0.6.0
+// claude-p removal (INT-1420/1574) as an OPT-IN provider — a fallback when codex hits its usage
+// limit or OpenRouter is unavailable.
 // ============================================
-
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type {
@@ -13,14 +15,15 @@ import type {
   WorkerResult,
   ReviewResult,
 } from './types.js';
-import type { ReviewDecision } from '../agents/agentPair.js';
+import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
+import { parseCliStreamChunk, extractResultFromStreamJson } from '../agents/cliStreamParser.js';
 import { extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
-import { extractResultFromStreamJson } from '../agents/cliStreamParser.js';
-import { t } from '../locale/index.js';
 
 const execFileAsync = promisify(execFile);
 
-// Claude CLI Adapter
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
 
 export class ClaudeCliAdapter implements CliAdapter {
   readonly name = 'claude';
@@ -30,9 +33,11 @@ export class ClaudeCliAdapter implements CliAdapter {
     supportsJsonOutput: true,
     supportsModelSelection: true,
     managedGit: false,
-    supportedSkills: ['/audit', '/documents', '/refactor'],
+    supportedSkills: [],
   };
 
+  /** `claude` must be on PATH. An interactive shell may alias it to a function; the real binary is
+   *  what a non-shell `which`/spawn resolves — which is exactly what buildCommand runs. */
   async isAvailable(): Promise<boolean> {
     try {
       await execFileAsync('which', ['claude']);
@@ -43,310 +48,37 @@ export class ClaudeCliAdapter implements CliAdapter {
   }
 
   buildCommand(options: CliRunOptions): { command: string; args: string[] } {
-    // options.prompt is the temp file path (set by spawnCli)
+    // spawnCli writes the prompt to a temp file (options.prompt = path). Pipe it via stdin to avoid
+    // arg-length/quoting limits. `--permission-mode bypassPermissions` lets the agent edit/run in the
+    // cwd without interactive prompts (headless). stream-json + --verbose gives parseable events.
     const promptFile = options.prompt;
-    const modelFlag = options.model ? ` --model ${options.model}` : '';
+    const modelFlag = options.model ? ` --model ${shellEscape(options.model)}` : '';
     const maxTurnsFlag = options.maxTurns ? ` --max-turns ${options.maxTurns}` : '';
-    const cmd = `echo "" | claude -p "$(cat ${promptFile})" --output-format stream-json --verbose --permission-mode bypassPermissions${modelFlag}${maxTurnsFlag}`;
+    const systemFlag = options.systemPrompt
+      ? ` --append-system-prompt ${shellEscape(options.systemPrompt)}`
+      : '';
+    const cmd =
+      `cat ${shellEscape(promptFile)} | claude -p --output-format stream-json --verbose ` +
+      `--permission-mode bypassPermissions${modelFlag}${maxTurnsFlag}${systemFlag}`;
     return { command: cmd, args: [] };
   }
 
+  parseStreamingChunk(chunk: string, onLog: (line: string) => void, buffer = ''): string {
+    return parseCliStreamChunk(chunk, onLog, buffer);
+  }
+
   parseWorkerOutput(raw: CliRunResult): WorkerResult {
-    try {
-      const costInfo = extractCostFromStreamJson(raw.stdout);
-      if (costInfo) {
-        console.log(`[Worker] Cost: ${formatCost(costInfo)}`);
-      }
-
-      const resultText = extractResultFromStreamJson(raw.stdout);
-      if (!resultText) {
-        const result = extractWorkerFromText(raw.stdout);
-        result.costInfo = costInfo;
-        return result;
-      }
-
-      const result = extractWorkerResultJson(resultText) || extractWorkerFromText(resultText);
-      result.costInfo = costInfo;
-      return result;
-    } catch (error) {
-      console.error('[Worker] Parse error:', error);
-      return extractWorkerFromText(raw.stdout);
-    }
+    const cost = extractCostFromStreamJson(raw.stdout);
+    if (cost) console.log(`[Worker] Cost: ${formatCost(cost)}`);
+    // claude -p stream-json wraps the final answer in a `result` event; fall back to raw stdout.
+    const resultText = extractResultFromStreamJson(raw.stdout) ?? raw.stdout;
+    return parseWorkerResult(resultText);
   }
 
   parseReviewerOutput(raw: CliRunResult): ReviewResult {
-    try {
-      const costInfo = extractCostFromStreamJson(raw.stdout);
-      if (costInfo) {
-        console.log(`[Reviewer] Cost: ${formatCost(costInfo)}`);
-      }
-
-      let resultText = '';
-      for (const line of raw.stdout.split('\n')) {
-        try {
-          const event = JSON.parse(line.trim());
-          if (event.type === 'result' && event.result) {
-            resultText = event.result;
-            break;
-          }
-        } catch { /* skip non-JSON lines */ }
-      }
-
-      if (!resultText) {
-        const result = extractReviewerFromText(raw.stdout);
-        result.costInfo = costInfo;
-        return result;
-      }
-
-      const result = extractReviewerResultJson(resultText) || extractReviewerFromText(resultText);
-      result.costInfo = costInfo;
-      return result;
-    } catch (error) {
-      console.error('[Reviewer] Parse error:', error);
-      return extractReviewerFromText(raw.stdout);
-    }
+    const cost = extractCostFromStreamJson(raw.stdout);
+    if (cost) console.log(`[Reviewer] Cost: ${formatCost(cost)}`);
+    const resultText = extractResultFromStreamJson(raw.stdout) ?? raw.stdout;
+    return parseReviewerResult(resultText);
   }
-}
-
-// Worker Output Parsing (extracted from worker.ts)
-
-function extractWorkerResultJson(text: string): WorkerResult | null {
-  const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
-  if (!jsonMatch) {
-    const objMatch = text.match(/\{\s*"success"\s*:/);
-    if (!objMatch) return null;
-
-    const startIdx = objMatch.index!;
-    let depth = 0;
-    let endIdx = startIdx;
-
-    for (let i = startIdx; i < text.length; i++) {
-      if (text[i] === '{') depth++;
-      if (text[i] === '}') {
-        depth--;
-        if (depth === 0) {
-          endIdx = i + 1;
-          break;
-        }
-      }
-    }
-
-    try {
-      const parsed = JSON.parse(text.slice(startIdx, endIdx));
-      return {
-        success: Boolean(parsed.success),
-        summary: parsed.summary || t('common.fallback.noSummary'),
-        filesChanged: Array.isArray(parsed.filesChanged) ? parsed.filesChanged : [],
-        commands: Array.isArray(parsed.commands) ? parsed.commands : [],
-        output: text,
-        error: parsed.error,
-        confidencePercent: typeof parsed.confidencePercent === 'number'
-          ? parsed.confidencePercent : undefined,
-        haltReason: parsed.haltReason || undefined,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  try {
-    const parsed = JSON.parse(jsonMatch[1]);
-    return {
-      success: Boolean(parsed.success),
-      summary: parsed.summary || '(no summary)',
-      filesChanged: Array.isArray(parsed.filesChanged) ? parsed.filesChanged : [],
-      commands: Array.isArray(parsed.commands) ? parsed.commands : [],
-      output: text,
-      error: parsed.error,
-      confidencePercent: typeof parsed.confidencePercent === 'number'
-        ? parsed.confidencePercent : undefined,
-      haltReason: parsed.haltReason || undefined,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function extractWorkerFromText(text: string): WorkerResult {
-  // Only flag as error if the text is very short (likely a CLI error message, not normal output)
-  // Normal worker output often contains words like "error" in code comments or descriptions
-  const isShortOutput = text.length < 500;
-  const hasError = isShortOutput && /\b(?:error|fail(?:ed)?|exception|cannot)\b/i.test(text);
-  const hasSuccess = /success|completed|done|finished/i.test(text);
-
-  const filePatterns = [
-    /(?:changed?|modified?|created?|updated?):\s*(.+\.(?:ts|js|py|json|yaml|yml|md))/gi,
-    /(?:src|lib|test|tests)\/[\w/\-.]+\.(?:ts|js|py)/gi,
-  ];
-
-  const filesChanged: string[] = [];
-  for (const pattern of filePatterns) {
-    const matches = text.matchAll(pattern);
-    for (const m of matches) {
-      const file = m[1] || m[0];
-      if (!filesChanged.includes(file)) {
-        filesChanged.push(file);
-      }
-    }
-  }
-
-  const cmdPattern = /(?:`|\$)\s*((?:npm|pnpm|yarn|git|python|pytest|tsc|eslint)\s+[^\n`]+)/gi;
-  const commands: string[] = [];
-  const cmdMatches = text.matchAll(cmdPattern);
-  for (const m of cmdMatches) {
-    if (!commands.includes(m[1])) {
-      commands.push(m[1].trim());
-    }
-  }
-
-  return {
-    success: !hasError || hasSuccess,
-    summary: extractSummary(text),
-    filesChanged: filesChanged.slice(0, 10),
-    commands: commands.slice(0, 10),
-    output: text,
-    error: hasError ? extractErrorMessage(text) : undefined,
-  };
-}
-
-function extractSummary(text: string): string {
-  const lines = text.split('\n').filter((l) => l.trim().length > 10);
-  if (lines.length === 0) return t('common.fallback.noSummary');
-  const summary = lines[0].trim();
-  return summary.length > 200 ? summary.slice(0, 200) + '...' : summary;
-}
-
-function extractErrorMessage(text: string): string {
-  const errorMatch = text.match(/(?:error|exception|failed?):\s*(.+)/i);
-  if (errorMatch) {
-    return errorMatch[1].slice(0, 200);
-  }
-  const lines = text.split('\n').filter((l) => /error|fail/i.test(l));
-  if (lines.length > 0) {
-    return lines[0].slice(0, 200);
-  }
-  return 'Unknown error';
-}
-
-// Reviewer Output Parsing (extracted from reviewer.ts)
-
-function extractReviewerResultJson(text: string): ReviewResult | null {
-  const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
-  if (!jsonMatch) {
-    const objMatch = text.match(/\{\s*"decision"\s*:/);
-    if (!objMatch) return null;
-
-    const startIdx = objMatch.index!;
-    let depth = 0;
-    let endIdx = startIdx;
-
-    for (let i = startIdx; i < text.length; i++) {
-      if (text[i] === '{') depth++;
-      if (text[i] === '}') {
-        depth--;
-        if (depth === 0) {
-          endIdx = i + 1;
-          break;
-        }
-      }
-    }
-
-    try {
-      const parsed = JSON.parse(text.slice(startIdx, endIdx));
-      return normalizeReviewResult(parsed);
-    } catch {
-      return null;
-    }
-  }
-
-  try {
-    const parsed = JSON.parse(jsonMatch[1]);
-    return normalizeReviewResult(parsed);
-  } catch {
-    return null;
-  }
-}
-
-function normalizeReviewResult(parsed: any): ReviewResult { // eslint-disable-line @typescript-eslint/no-explicit-any -- JSON parse result
-  let decision: ReviewDecision = 'revise';
-  if (['approve', 'revise', 'reject'].includes(parsed.decision)) {
-    decision = parsed.decision as ReviewDecision;
-  } else if (parsed.decision) {
-    const normalized = parsed.decision.toLowerCase();
-    if (normalized.includes('approv') || normalized.includes('pass')) {
-      decision = 'approve';
-    } else if (normalized.includes('reject') || normalized.includes('fail')) {
-      decision = 'reject';
-    }
-  }
-
-  return {
-    decision,
-    feedback: parsed.feedback || t('common.fallback.noFeedback'),
-    issues: Array.isArray(parsed.issues) ? parsed.issues : [],
-    suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : [],
-  };
-}
-
-function extractReviewerFromText(text: string): ReviewResult {
-  let decision: ReviewDecision = 'revise';
-  const lowerText = text.toLowerCase();
-
-  if (lowerText.includes('approve') || lowerText.includes('lgtm')) {
-    decision = 'approve';
-  } else if (lowerText.includes('reject')) {
-    decision = 'reject';
-  } else if (lowerText.includes('revise') || lowerText.includes('improve')) {
-    decision = 'revise';
-  }
-
-  const issues: string[] = [];
-  const issuePatterns = [
-    /(?:issue|problem|error):\s*(.+)/gi,
-    /(?:missing):\s*(.+)/gi,
-    /- (?:fix|resolve):\s*(.+)/gi,
-  ];
-
-  for (const pattern of issuePatterns) {
-    const matches = text.matchAll(pattern);
-    for (const m of matches) {
-      if (m[1] && !issues.includes(m[1].trim())) {
-        issues.push(m[1].trim().slice(0, 200));
-      }
-    }
-  }
-
-  const suggestions: string[] = [];
-  const suggestionPatterns = [
-    /(?:suggest|recommend):\s*(.+)/gi,
-    /(?:consider):\s*(.+)/gi,
-    /(?:should):\s*(.+)/gi,
-  ];
-
-  for (const pattern of suggestionPatterns) {
-    const matches = text.matchAll(pattern);
-    for (const m of matches) {
-      if (m[1] && !suggestions.includes(m[1].trim())) {
-        suggestions.push(m[1].trim().slice(0, 200));
-      }
-    }
-  }
-
-  return {
-    decision,
-    feedback: extractFeedback(text),
-    issues: issues.slice(0, 5),
-    suggestions: suggestions.slice(0, 5),
-  };
-}
-
-function extractFeedback(text: string): string {
-  const lines = text.split('\n').filter((l) => {
-    const trimmed = l.trim();
-    return trimmed.length > 20 && !trimmed.startsWith('#') && !trimmed.startsWith('```');
-  });
-
-  if (lines.length === 0) return t('common.fallback.noFeedback');
-  const feedback = lines[0].trim();
-  return feedback.length > 300 ? feedback.slice(0, 300) + '...' : feedback;
 }

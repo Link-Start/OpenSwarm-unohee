@@ -468,7 +468,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         const body = await readBody(req);
         try {
           const { provider } = JSON.parse(body) as { provider: string };
-          const VALID_PROVIDERS = ['codex', 'gpt', 'local', 'lmstudio', 'openrouter'] as const;
+          const VALID_PROVIDERS = ['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter', 'claude'] as const;
           if (!VALID_PROVIDERS.includes(provider as typeof VALID_PROVIDERS[number])) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: `Invalid provider. Valid: ${VALID_PROVIDERS.join(', ')}` }));

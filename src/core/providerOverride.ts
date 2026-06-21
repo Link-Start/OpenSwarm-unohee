@@ -11,7 +11,7 @@ import type { AdapterName } from '../adapters/types.js';
 
 const OVERRIDE_DIR = join(homedir(), '.config', 'openswarm');
 const OVERRIDE_PATH = join(OVERRIDE_DIR, 'provider-override.json');
-const VALID: readonly AdapterName[] = ['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter'];
+const VALID: readonly AdapterName[] = ['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter', 'claude'];
 
 /** The provider the user last selected via the dashboard, or undefined if never toggled. */
 export function readProviderOverride(): AdapterName | undefined {

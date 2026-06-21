@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { writeFile, unlink } from 'node:fs/promises';
 import type { AdapterName } from '../adapters/index.js';
 import { getAdapter, getDefaultAdapterName } from '../adapters/index.js';
+import { extractResultFromStreamJson } from '../agents/cliStreamParser.js';
 
 export interface ChatCompletionOptions {
   prompt: string;
@@ -77,11 +78,19 @@ export const CHAT_MODEL_ALIASES: Record<AdapterName, Record<string, string>> = {
     kimi: 'moonshotai/kimi-k2',
     glm: 'z-ai/glm-4.6',
   },
+  // `claude -p` accepts short aliases (sonnet/opus/haiku) directly; full ids pass through.
+  claude: {
+    sonnet: 'sonnet',
+    opus: 'opus',
+    haiku: 'haiku',
+  },
 };
 
 export function inferProviderFromModel(model?: string): AdapterName {
   if (!model) return getDefaultAdapterName();
   if (model.includes('codex')) return 'codex';
+  // Bare claude ids/aliases → claude -p (anthropic/claude-… has a slash → openrouter, handled below).
+  if (model.startsWith('claude-') || model === 'sonnet' || model === 'opus' || model === 'haiku') return 'claude';
   if (model.startsWith('gpt-') || model.startsWith('o3') || model.startsWith('o4')) return 'gpt';
   if (model.includes('/')) return 'openrouter';
   // 로컬 모델 패턴: ollama 태그 형식 (name:tag) 또는 알려진 오픈소스 모델
@@ -99,6 +108,7 @@ export function getDefaultChatModel(provider: AdapterName): string {
   if (provider === 'local') return 'gemma3:4b';
   if (provider === 'lmstudio') return process.env.LMSTUDIO_MODEL ?? 'local-model';
   if (provider === 'openrouter') return 'openai/gpt-5';
+  if (provider === 'claude') return 'sonnet';
   return 'gpt-5-codex';
 }
 
@@ -273,7 +283,9 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
           return;
         }
 
-        const response = extractCodexChatResponse(stdout);
+        // codex emits the answer in `item.completed agent_message`; claude -p (stream-json) wraps it
+        // in a `result` event. Try codex form first, then fall back to the generic stream-json result.
+        const response = extractCodexChatResponse(stdout) || (extractResultFromStreamJson(stdout) ?? '');
         const cost = undefined;
         const tokens = undefined;
 
