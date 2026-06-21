@@ -45,7 +45,12 @@ ${previousFeedback}
 `
       : '';
 
-    // Code context section (draftAnalysis + impactAnalysis + registryBriefs + repoMemories)
+    // Code context section (draftAnalysis + impactAnalysis + registryBriefs + repoMemories).
+    // 작은 reasoning 모델은 거대한 auto-context에 묻힌다(worker가 176k–212k tokens 쓰고 edit 0).
+    // 리스트 길이와 항목별 content 길이를 전부 cap한다 — 기존엔 어디에도 cap이 없었다.
+    const capList = (arr: string[], n: number): string =>
+      arr.length > n ? `${arr.slice(0, n).join(', ')} (+${arr.length - n} 외)` : arr.join(', ');
+    const capStr = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
     let contextSection = '';
     if (context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length) {
       const parts: string[] = ['## 코드 컨텍스트 (자동 생성)'];
@@ -53,9 +58,9 @@ ${previousFeedback}
       if (context.repoMemories && context.repoMemories.length > 0) {
         parts.push('');
         parts.push('### 저장소 지식 (이 repo의 과거 작업에서 학습)');
-        for (const m of context.repoMemories) {
+        for (const m of context.repoMemories.slice(0, 4)) {
           const tag = m.type === 'constraint' ? '⚠️ 함정' : '✓ 패턴';
-          parts.push(`- [${tag}] **${m.title}**: ${m.content}`);
+          parts.push(`- [${tag}] **${m.title}**: ${capStr(m.content, 400)}`);
         }
         parts.push('이 지식을 활용해 재탐색을 건너뛰고 과거 실수를 반복하지 마라.');
       }
@@ -68,7 +73,7 @@ ${previousFeedback}
         parts.push(`- **의도:** ${da.intentSummary}`);
         parts.push(`- **접근 방식:** ${da.suggestedApproach}`);
         if (da.relevantFiles.length > 0) {
-          parts.push(`- **관련 파일:** ${da.relevantFiles.join(', ')}`);
+          parts.push(`- **관련 파일:** ${capList(da.relevantFiles, 12)}`);
         }
         if (da.projectStats) {
           parts.push(`- **프로젝트 상태:** ${da.projectStats}`);
@@ -79,12 +84,12 @@ ${previousFeedback}
         const ia = context.impactAnalysis;
         parts.push('');
         parts.push('### 영향 범위');
-        parts.push(`- **직접 영향:** ${ia.directModules.join(', ') || '식별 안됨'}`);
+        parts.push(`- **직접 영향:** ${capList(ia.directModules, 10) || '식별 안됨'}`);
         if (ia.dependentModules.length > 0) {
-          parts.push(`- **간접 의존:** ${ia.dependentModules.join(', ')}`);
+          parts.push(`- **간접 의존:** ${capList(ia.dependentModules, 10)}`);
         }
         if (ia.testFiles.length > 0) {
-          parts.push(`- **실행할 테스트:** ${ia.testFiles.join(', ')}`);
+          parts.push(`- **실행할 테스트:** ${capList(ia.testFiles, 8)}`);
         }
         parts.push(`- **영향 범위:** ${ia.estimatedScope}`);
       }
@@ -92,13 +97,14 @@ ${previousFeedback}
       if (context.registryBriefs && context.registryBriefs.length > 0) {
         parts.push('');
         parts.push('### 파일 맵 (Code Registry — 이 파일들은 Read 불필요)');
-        for (const brief of context.registryBriefs) {
+        // 상위 파일 + 파일당 상위 엔티티만.
+        for (const brief of context.registryBriefs.slice(0, 5)) {
           parts.push(`**${brief.filePath}** (${brief.summary})`);
           if (brief.highlights.length > 0) {
             parts.push(`⚠️ ${brief.highlights.join(', ')}`);
           }
           if (brief.entities && brief.entities.length > 0) {
-            for (const e of brief.entities) {
+            for (const e of brief.entities.slice(0, 10)) {
               const sig = e.signature ? ` — ${e.signature}` : '';
               const flags: string[] = [];
               if (e.status !== 'active') flags.push(e.status);

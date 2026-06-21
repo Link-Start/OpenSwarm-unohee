@@ -44,7 +44,13 @@ Apply the above feedback and make corrections.
 `
       : '';
 
-    // Code context section (draftAnalysis + impactAnalysis + registryBriefs + repoMemories)
+    // Code context section (draftAnalysis + impactAnalysis + registryBriefs + repoMemories).
+    // Hard caps EVERYWHERE: small reasoning models drown in a huge auto-context (workers burned
+    // 176k–212k tokens and never edited). Cap list LENGTHS and per-item CONTENT length — only
+    // registryBriefs was capped before; repoMemories/relevantFiles/impact lists were unbounded.
+    const capList = (arr: string[], n: number): string =>
+      arr.length > n ? `${arr.slice(0, n).join(', ')} (+${arr.length - n} more)` : arr.join(', ');
+    const capStr = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
     let contextSection = '';
     if (context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length) {
       const parts: string[] = ['## Code Context (auto-generated)'];
@@ -52,9 +58,9 @@ Apply the above feedback and make corrections.
       if (context.repoMemories && context.repoMemories.length > 0) {
         parts.push('');
         parts.push('### Repository Knowledge (learned from past tasks in this repo)');
-        for (const m of context.repoMemories) {
+        for (const m of context.repoMemories.slice(0, 4)) {
           const tag = m.type === 'constraint' ? '⚠️ PITFALL' : '✓ pattern';
-          parts.push(`- [${tag}] **${m.title}**: ${m.content}`);
+          parts.push(`- [${tag}] **${m.title}**: ${capStr(m.content, 400)}`);
         }
         parts.push('Use this knowledge to skip re-discovery and avoid repeating past mistakes.');
       }
@@ -67,7 +73,7 @@ Apply the above feedback and make corrections.
         parts.push(`- **Intent:** ${da.intentSummary}`);
         parts.push(`- **Approach:** ${da.suggestedApproach}`);
         if (da.relevantFiles.length > 0) {
-          parts.push(`- **Likely files:** ${da.relevantFiles.join(', ')}`);
+          parts.push(`- **Likely files:** ${capList(da.relevantFiles, 12)}`);
         }
         if (da.projectStats) {
           parts.push(`- **Project health:** ${da.projectStats}`);
@@ -78,12 +84,12 @@ Apply the above feedback and make corrections.
         const ia = context.impactAnalysis;
         parts.push('');
         parts.push('### Affected Modules');
-        parts.push(`- **Direct:** ${ia.directModules.join(', ') || 'none identified'}`);
+        parts.push(`- **Direct:** ${capList(ia.directModules, 10) || 'none identified'}`);
         if (ia.dependentModules.length > 0) {
-          parts.push(`- **Dependents:** ${ia.dependentModules.join(', ')}`);
+          parts.push(`- **Dependents:** ${capList(ia.dependentModules, 10)}`);
         }
         if (ia.testFiles.length > 0) {
-          parts.push(`- **Test files to run:** ${ia.testFiles.join(', ')}`);
+          parts.push(`- **Test files to run:** ${capList(ia.testFiles, 8)}`);
         }
         parts.push(`- **Estimated scope:** ${ia.estimatedScope}`);
       }
@@ -91,15 +97,14 @@ Apply the above feedback and make corrections.
       if (context.registryBriefs && context.registryBriefs.length > 0) {
         parts.push('');
         parts.push('### File Map (from Code Registry — no need to Read these files)');
-        // Cap hard: small models drown in a huge auto-context (workers burned
-        // 176k–212k tokens and never edited). Top files + top entities per file only.
-        for (const brief of context.registryBriefs.slice(0, 6)) {
+        // Top files + top entities per file only.
+        for (const brief of context.registryBriefs.slice(0, 5)) {
           parts.push(`**${brief.filePath}** (${brief.summary})`);
           if (brief.highlights.length > 0) {
             parts.push(`⚠️ ${brief.highlights.join(', ')}`);
           }
           if (brief.entities && brief.entities.length > 0) {
-            for (const e of brief.entities.slice(0, 12)) {
+            for (const e of brief.entities.slice(0, 10)) {
               const sig = e.signature ? ` — ${e.signature}` : '';
               const flags: string[] = [];
               if (e.status !== 'active') flags.push(e.status);
