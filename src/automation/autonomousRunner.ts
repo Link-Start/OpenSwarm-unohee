@@ -1139,7 +1139,13 @@ export class AutonomousRunner {
         // (o-series, claude, openrouter ids) → undefined → adapter DEFAULT_MODEL.
         return model?.startsWith('gpt-') ? model : undefined;
       }
-      // openrouter / gpt / local / claude CLI: trust the configured id as-is.
+      if (adapter === 'claude') {
+        // `claude -p` only accepts Claude models; an openrouter/codex id (qwen/…, gpt-…) is rejected
+        // ("model may not exist") → undefined → claude's own default. INT-1487 hit this on switch.
+        const isClaude = !!model && (model.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(model));
+        return isClaude ? model : undefined;
+      }
+      // openrouter / gpt / local: trust the configured id as-is.
       return model;
     };
 

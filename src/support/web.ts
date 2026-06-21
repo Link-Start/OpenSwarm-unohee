@@ -27,7 +27,7 @@ import { PairPipeline, type PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineStage, RoleConfig } from '../core/types.js';
 import { initLocale } from '../locale/index.js';
-import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
+import { runChatCompletion, getDefaultChatModel, inferProviderFromModel } from './chatBackend.js';
 import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
 import { createSubIssuesWithDependencies, getTaskSource } from '../automation/runnerExecution.js';
@@ -650,7 +650,10 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         // "(adapter default)", so codex exec returned nothing → "[No response]" (INT-1658).
         const provider = getDefaultAdapterName();
         const summaryModel = runnerRef?.getAdapterSummary().worker?.model;
-        const model = (summaryModel && summaryModel !== '(adapter default)')
+        // Only reuse the configured worker model if it belongs to the chat provider. A cross-provider
+        // id (e.g. an openrouter 'qwen/…' model while the provider is claude/codex) gets rejected
+        // ("model may not exist"); fall back to the provider's own default chat model instead.
+        const model = (summaryModel && summaryModel !== '(adapter default)' && inferProviderFromModel(summaryModel) === provider)
           ? summaryModel
           : getDefaultChatModel(provider);
 

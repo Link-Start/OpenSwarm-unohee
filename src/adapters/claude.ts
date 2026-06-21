@@ -52,7 +52,12 @@ export class ClaudeCliAdapter implements CliAdapter {
     // arg-length/quoting limits. `--permission-mode bypassPermissions` lets the agent edit/run in the
     // cwd without interactive prompts (headless). stream-json + --verbose gives parseable events.
     const promptFile = options.prompt;
-    const modelFlag = options.model ? ` --model ${shellEscape(options.model)}` : '';
+    // Only pass --model for actual Claude models. A cross-provider id (openrouter 'qwen/…', 'gpt-…',
+    // gemini) would make claude error "model may not exist" (INT-1487) — drop it and let claude use
+    // its own default instead. Single defensive guard covering worker/chat/conflict paths.
+    const isClaudeModel =
+      !!options.model && (options.model.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(options.model));
+    const modelFlag = isClaudeModel ? ` --model ${shellEscape(options.model!)}` : '';
     const maxTurnsFlag = options.maxTurns ? ` --max-turns ${options.maxTurns}` : '';
     const systemFlag = options.systemPrompt
       ? ` --append-system-prompt ${shellEscape(options.systemPrompt)}`
