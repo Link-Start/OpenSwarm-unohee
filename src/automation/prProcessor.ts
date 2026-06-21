@@ -208,43 +208,33 @@ export class PRProcessor {
             console.log(`[PRProcessor] ${key}: review feedback detected (bypassing cooldown)`);
           }
 
-          // If no conflicts and no review feedback, check CI status — only process PRs with failures
-          let needsCI = false;
-          if (!hasConflicts && !hasReviewFeedback) {
-            const { getPRChecks } = await import('../github/index.js');
-            const checks = await getPRChecks(repo, pr.number);
-            const hasFailure = checks.some(
-              (c) => c.conclusion === 'failure' || c.conclusion === 'timed_out'
-            );
-            if (!hasFailure && checks.length > 0) {
-              // CI green + no conflicts + no review feedback → ready to merge, but the
-              // MERGE decision stays with the human. OpenSwarm's job is to get the PR
-              // CI-green; it does not merge automatically.
-              console.log(`[PRProcessor] ${key}: no conflicts, no review feedback, CI passing — ready for manual merge, skipping`);
-              continue;
-            }
-            if (checks.length === 0) {
-              // PR has NO CI checks at all (e.g. an older PR opened before CI auto-add).
-              // Add a default CI workflow to its branch so it gets an objective gate.
-              needsCI = true;
-            }
-          } else if (hasConflicts) {
-            console.log(`[PRProcessor] ${key}: merge conflicts detected, will attempt resolution`);
-          } else if (hasReviewFeedback) {
-            console.log(`[PRProcessor] ${key}: review feedback detected, will address feedback`);
-          }
-
-          // Map repo to local project path
+          // Map repo to local project path (needed for local CI + workflow add)
           const projectPath = this.mapRepoToProject(repo);
           if (!projectPath) {
             console.log(`[PRProcessor] ${key}: no local project found, skipping`);
             continue;
           }
 
-          // A CI-less PR just needs a workflow added to its branch — no worker run.
-          if (needsCI) {
+          // CI gate. GitHub Actions needs cloud credits, so run the tests LOCALLY instead
+          // (checkout branch → detect language → run pytest/ruff or tsc/test). OpenSwarm only gets
+          // the PR to CI-green; the MERGE decision stays with the human (no auto-merge).
+          if (!hasConflicts && !hasReviewFeedback) {
+            const { runLocalCI } = await import('./localCI.js');
+            const ci = await runLocalCI(projectPath, pr.branch);
+            if (ci.ran) {
+              await execFileAsync('gh', ['pr', 'comment', String(pr.number), '--repo', repo, '--body',
+                `🤖 **Local CI: ${ci.success ? '✅ PASS' : '❌ FAIL'}** (GitHub Actions bypassed — run locally)\n\n\`\`\`\n${ci.output.slice(0, 2500)}\n\`\`\``,
+              ]).catch(() => {});
+              console.log(`[PRProcessor] ${key}: local CI ${ci.success ? 'passed — ready for manual merge' : 'FAILED — commented for manual fix'}, skipping`);
+              continue;
+            }
+            // No recognized project language → fall back to adding a default CI workflow.
             await this.addCIWorkflowToPR(pr.branch, projectPath, key);
             continue;
+          } else if (hasConflicts) {
+            console.log(`[PRProcessor] ${key}: merge conflicts detected, will attempt resolution`);
+          } else if (hasReviewFeedback) {
+            console.log(`[PRProcessor] ${key}: review feedback detected, will address feedback`);
           }
 
           // TaskScheduler concurrency check.
