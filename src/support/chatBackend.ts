@@ -285,17 +285,18 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
 
         // codex emits the answer in `item.completed agent_message`; claude -p (stream-json) wraps it
         // in a `result` event. Try codex form first, then fall back to the generic stream-json result.
-        const response = extractCodexChatResponse(stdout) || (extractResultFromStreamJson(stdout) ?? '');
-        const cost = undefined;
-        const tokens = undefined;
+        const answer = extractCodexChatResponse(stdout) || (extractResultFromStreamJson(stdout) ?? '');
+        // No answer? The turn may have FAILED with an error event (e.g. usage limit) that exits 0,
+        // so it never hit the reject above. Surface that reason instead of a blank "[No response]".
+        const response = answer || extractStreamErrorMessage(stdout) || '[No response]';
 
         resolve({
-          response: response || '[No response]',
+          response,
           provider,
           model,
           sessionId: capturedSessionId || undefined,
-          cost,
-          tokens,
+          cost: undefined,
+          tokens: undefined,
         });
       });
 
@@ -331,4 +332,36 @@ function extractCodexChatResponse(stdout: string): string {
   return lastMessage;
 }
 
+/**
+ * Pull a human-readable failure reason out of a CLI stream when the turn produced no answer.
+ * codex emits `{"type":"error","message":"…"}` (the message is often itself a JSON string), and a
+ * stream may carry a `result` event flagged `is_error`. Without this, a usage-limit / rate-limit
+ * failure (which exits 0) was masked as a blank "[No response]". Returns '' when no error is found.
+ */
+function extractStreamErrorMessage(stdout: string): string {
+  let raw = '';
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const event = JSON.parse(trimmed);
+      if (event.type === 'error' && typeof event.message === 'string') raw = event.message;
+      else if (event.type === 'result' && event.is_error && typeof event.result === 'string') raw = event.result || raw;
+    } catch {
+      // Ignore malformed lines.
+    }
+  }
+  if (!raw) return '';
+  // codex nests the real error as a JSON string inside `message` — unwrap it.
+  try {
+    const inner = JSON.parse(raw) as { error?: { message?: string }; message?: string };
+    raw = inner.error?.message ?? inner.message ?? raw;
+  } catch {
+    // raw is already a plain string.
+  }
+  if (/usage limit|rate limit|quota|too many requests|\b429\b|insufficient.*credit/i.test(raw)) {
+    return `⚠️ Usage limit reached — ${raw}`;
+  }
+  return `⚠️ Provider error — ${raw}`;
+}
 
