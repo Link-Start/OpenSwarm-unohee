@@ -441,10 +441,17 @@ export function allToolCallsSeen(toolCalls: ToolCall[], seen: Set<string>): bool
 }
 
 /**
- * Read-loop guard predicate (exported for unit testing). True when the model has
- * spent enough turns without ANY edit that it should be nudged to start editing —
- * catches the "reads many different files, never edits, hits maxTurns" failure that
- * the no-edit-on-finish guard misses (because that one only fires on a text-only stop).
+ * Read-loop guard predicate (exported for unit testing). True only when the model is
+ * NEAR the turn budget with still ZERO edits — it has had ample turns to investigate and
+ * is about to run out having only read/searched. Catches the "reads many different files,
+ * never edits, hits maxTurns → no file changes" failure the no-edit-on-finish guard misses.
+ *
+ * It deliberately fires LATE (last ~2 turns), not at the halfway mark. The old halfway
+ * threshold nudged mid-investigation and pushed the worker to edit before it understood the
+ * code — it would even refuse to read_file, reasoning that reads were unwanted. Sufficient
+ * investigation must be allowed; this is a last-resort nudge right before the budget runs
+ * out, not a "stop reading" signal. (Repeated/looping reads are already caught separately by
+ * the progress-based stop, so a turn-count threshold here only needs to catch the tail.)
  */
 export function shouldNudgeReadLoop(
   editToolCount: number,
@@ -453,7 +460,7 @@ export function shouldNudgeReadLoop(
   turn: number,
   maxTurns: number,
 ): boolean {
-  return editToolCount === 0 && nudgesUsed < nudgeMax && turn >= Math.floor(maxTurns / 2);
+  return editToolCount === 0 && nudgesUsed < nudgeMax && turn >= maxTurns - 2;
 }
 
 // ============ 히스토리 압축 (VEGA compaction.py 패턴 이식) ============

@@ -33,20 +33,21 @@ describe('progress-based stop helpers', () => {
 });
 
 describe('read-loop guard (shouldNudgeReadLoop)', () => {
-  const MAX = 20; // floor(20/2) = 10 → halfway boundary
-  it('nudges when no edits and past the halfway mark', () => {
-    expect(shouldNudgeReadLoop(0, 0, 3, 10, MAX)).toBe(true);
-    expect(shouldNudgeReadLoop(0, 0, 3, 15, MAX)).toBe(true);
+  const MAX = 20; // maxTurns - 2 = 18 → near-budget boundary (fires late, not at halfway)
+  it('nudges when no edits and near the turn budget', () => {
+    expect(shouldNudgeReadLoop(0, 0, 3, 18, MAX)).toBe(true);
+    expect(shouldNudgeReadLoop(0, 0, 3, 19, MAX)).toBe(true);
   });
-  it('does not nudge before halfway (still legitimately exploring)', () => {
-    expect(shouldNudgeReadLoop(0, 0, 3, 9, MAX)).toBe(false);
+  it('does not nudge mid-investigation (still legitimately exploring)', () => {
+    expect(shouldNudgeReadLoop(0, 0, 3, 17, MAX)).toBe(false);
+    expect(shouldNudgeReadLoop(0, 0, 3, 10, MAX)).toBe(false);
     expect(shouldNudgeReadLoop(0, 0, 3, 0, MAX)).toBe(false);
   });
   it('does not nudge once at least one edit has happened', () => {
-    expect(shouldNudgeReadLoop(1, 0, 3, 15, MAX)).toBe(false);
+    expect(shouldNudgeReadLoop(1, 0, 3, 18, MAX)).toBe(false);
   });
   it('does not nudge after the nudge budget is exhausted', () => {
-    expect(shouldNudgeReadLoop(0, 3, 3, 15, MAX)).toBe(false);
+    expect(shouldNudgeReadLoop(0, 3, 3, 18, MAX)).toBe(false);
   });
 });
 

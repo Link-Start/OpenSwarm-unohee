@@ -133,7 +133,14 @@ export class ConflictResolver {
       // 2. Fetch latest
       await gitExec(projectPath, 'fetch', 'origin');
 
-      // 3. Checkout PR branch
+      // 3. Checkout PR branch.
+      // Discard leftovers that would abort the checkout: OpenSwarm's own untracked
+      // .openswarm/* scan output (knowledge graph snapshots), plus any uncommitted edits a
+      // previous run left in this shared checkout. Without this the checkout fails ("local
+      // changes / untracked files would be overwritten") and conflict resolution never even
+      // starts — which is exactly the "cannot switch branch" loop on conflicted PRs.
+      await gitExec(projectPath, 'reset', '--hard', 'HEAD').catch(() => {});
+      await gitExec(projectPath, 'clean', '-fd', '.openswarm').catch(() => {});
       await gitExec(projectPath, 'checkout', pr.branch);
       await gitExec(projectPath, 'pull', 'origin', pr.branch);
 
