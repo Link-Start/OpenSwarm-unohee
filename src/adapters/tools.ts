@@ -260,7 +260,7 @@ const DEFAULT_BASH_TIMEOUT_MS = 120000;
 /** Search cwd and its ancestors for a Python venv (.venv/venv with bin/python). Returns the
  *  venv dir, or '' if none. Lets the bash tool activate a repo-local venv even from a worktree
  *  (the worktree's project root is a few levels up), with no config required. */
-function findProjectVenv(startDir: string): string {
+export function findProjectVenv(startDir: string): string {
   let dir = startDir;
   for (let i = 0; i < 8; i++) {
     for (const name of ['.venv', 'venv']) {

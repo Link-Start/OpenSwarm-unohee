@@ -5,8 +5,21 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { findProjectVenv } from '../adapters/tools.js';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Build the env for CI steps with the project's Python venv on PATH. Without this, `pytest`/`ruff`
+ * resolve to system Python — which lacks the project's test deps (e.g. pytest-xdist), so a repo
+ * pytest.ini with `addopts = -n auto` fails with "unrecognized arguments: -n" and the gate wrongly
+ * blocks the PR. Mirrors the bash tool's venv resolution: repo-local .venv → OPENSWARM_PYTHON_VENV.
+ */
+function venvEnv(projectPath: string): NodeJS.ProcessEnv {
+  const venv = findProjectVenv(projectPath) || process.env.OPENSWARM_PYTHON_VENV || '';
+  if (!venv) return process.env;
+  return { ...process.env, VIRTUAL_ENV: venv, PATH: `${join(venv, 'bin')}:${process.env.PATH ?? ''}` };
+}
 
 export interface LocalCIResult {
   /** true = all gate steps passed (or only missing-tool steps were skipped) */
@@ -64,9 +77,10 @@ export async function runLocalCI(projectPath: string, branch: string): Promise<L
   let success = true;
   let ran = false;
   let output = '';
+  const env = venvEnv(projectPath);
   for (const s of steps) {
     try {
-      const r = await execFileAsync(s.cmd, s.args, { cwd: projectPath, timeout: 300_000, maxBuffer: 10 * 1024 * 1024 });
+      const r = await execFileAsync(s.cmd, s.args, { cwd: projectPath, timeout: 300_000, maxBuffer: 10 * 1024 * 1024, env });
       ran = true;
       output += `✓ ${s.label}\n${(r.stdout || '').slice(-600)}\n`;
     } catch (e) {
