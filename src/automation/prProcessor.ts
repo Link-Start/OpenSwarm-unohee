@@ -215,7 +215,10 @@ export class PRProcessor {
               (c) => c.conclusion === 'failure' || c.conclusion === 'timed_out'
             );
             if (!hasFailure && checks.length > 0) {
-              console.log(`[PRProcessor] ${key}: no conflicts, no review feedback, and CI passing, skipping`);
+              // CI green + no conflicts + no review feedback → ready to merge, but the
+              // MERGE decision stays with the human. OpenSwarm's job is to get the PR
+              // CI-green; it does not merge automatically.
+              console.log(`[PRProcessor] ${key}: no conflicts, no review feedback, CI passing — ready for manual merge, skipping`);
               continue;
             }
           } else if (hasConflicts) {
