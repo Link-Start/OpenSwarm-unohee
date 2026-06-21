@@ -128,6 +128,7 @@ Apply the above feedback and make corrections.
 ${feedbackSection}${contextSection}
 ## Rules
 - Search codebase thoroughly before concluding. Use Grep/Read — don't guess.
+- **Before each tool call, say in ONE sentence (as normal response text, not inside the tool args) what you're about to do and why.** Don't fire tools silently in a chain — if you do, your intent never reaches the Live Log and a human can't diagnose the work. Think out loud, briefly.
 - Verify changes compile before reporting success.
 - If uncertain, report clearly — don't implement workarounds.
 - No destructive commands (rm -rf, git reset --hard). No .env/.bashrc edits.
