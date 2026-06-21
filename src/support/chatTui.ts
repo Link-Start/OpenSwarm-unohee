@@ -1064,10 +1064,15 @@ async function handleCommand(
         ui.chatLog.log(`  {bold}Current provider:{/bold} {#c084fc-fg}${state.session.provider}{/}`);
         ui.chatLog.log('  {#718096-fg}Available providers:{/}');
         ui.chatLog.log('    {#a0aec0-fg}codex{/}');
+        ui.chatLog.log('    {#a0aec0-fg}codex-responses{/}');
+        ui.chatLog.log('    {#a0aec0-fg}claude{/}');
         ui.chatLog.log('    {#a0aec0-fg}openrouter{/}');
         ui.chatLog.log('    {#a0aec0-fg}lmstudio{/}');
         ui.chatLog.log('    {#a0aec0-fg}local{/}');
         ui.chatLog.log('    {#a0aec0-fg}gpt{/}');
+      } else if (!isKnownAdapter(next)) {
+        ui.chatLog.log(`  {#f87171-fg}✖ Unknown provider: {bold}${next}{/bold}{/}`);
+        ui.chatLog.log('  {#718096-fg}Try: codex, codex-responses, claude, openrouter, lmstudio, local, gpt{/}');
       } else {
         state.session.provider = next as AdapterName;
         state.session.model = getDefaultChatModel(state.session.provider);
