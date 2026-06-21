@@ -36,7 +36,7 @@ describe('reduceChatChunks', () => {
       { choices: [{ delta: { content: 'hi' } }] },
       { choices: [], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } },
     ]);
-    expect(res.usage).toEqual({ prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 });
+    expect(res.usage).toEqual({ prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, cached_tokens: 0 });
   });
 
   it('handles multiple distinct tool-call indices', () => {

@@ -13,9 +13,9 @@ import type {
   WorkerResult,
   ReviewResult,
 } from './types.js';
-import { t } from '../locale/index.js';
 import { AuthProfileStore, ensureValidToken } from '../auth/index.js';
 import { getCodexModelIds } from './codexModels.js';
+import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -93,13 +93,11 @@ export class CodexCliAdapter implements CliAdapter {
   }
 
   parseWorkerOutput(raw: CliRunResult): WorkerResult {
-    const resultText = extractCodexMessageText(raw.stdout);
-    return extractWorkerResultJson(resultText) || extractWorkerFromText(resultText);
+    return parseWorkerResult(extractCodexMessageText(raw.stdout));
   }
 
   parseReviewerOutput(raw: CliRunResult): ReviewResult {
-    const resultText = extractCodexMessageText(raw.stdout);
-    return extractReviewerResultJson(resultText) || extractReviewerFromText(resultText);
+    return parseReviewerResult(extractCodexMessageText(raw.stdout));
   }
 }
 
@@ -270,218 +268,6 @@ function summarizeCodexReasoning(item: Record<string, unknown>): string | null {
   }
 
   return null;
-}
-
-function extractWorkerResultJson(text: string): WorkerResult | null {
-  const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
-  if (!jsonMatch) {
-    const objMatch = text.match(/\{\s*"success"\s*:/);
-    if (!objMatch) return null;
-
-    const startIdx = objMatch.index!;
-    let depth = 0;
-    let endIdx = startIdx;
-
-    for (let i = startIdx; i < text.length; i++) {
-      if (text[i] === '{') depth++;
-      if (text[i] === '}') {
-        depth--;
-        if (depth === 0) {
-          endIdx = i + 1;
-          break;
-        }
-      }
-    }
-
-    try {
-      const parsed = JSON.parse(text.slice(startIdx, endIdx));
-      return {
-        success: Boolean(parsed.success),
-        summary: parsed.summary || t('common.fallback.noSummary'),
-        filesChanged: Array.isArray(parsed.filesChanged) ? parsed.filesChanged : [],
-        commands: Array.isArray(parsed.commands) ? parsed.commands : [],
-        output: text,
-        error: parsed.error,
-        confidencePercent: typeof parsed.confidencePercent === 'number'
-          ? parsed.confidencePercent : undefined,
-        haltReason: parsed.haltReason || undefined,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  try {
-    const parsed = JSON.parse(jsonMatch[1]);
-    return {
-      success: Boolean(parsed.success),
-      summary: parsed.summary || t('common.fallback.noSummary'),
-      filesChanged: Array.isArray(parsed.filesChanged) ? parsed.filesChanged : [],
-      commands: Array.isArray(parsed.commands) ? parsed.commands : [],
-      output: text,
-      error: parsed.error,
-      confidencePercent: typeof parsed.confidencePercent === 'number'
-        ? parsed.confidencePercent : undefined,
-      haltReason: parsed.haltReason || undefined,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function extractWorkerFromText(text: string): WorkerResult {
-  // Only an explicit failure phrase marks the run as failed. Loose "error"/"fail"
-  // words appear in normal coding prose; git-diff promotion in worker.ts is the
-  // real success signal.
-  const failed = isExplicitFailure(text);
-
-  const filePatterns = [
-    /(?:changed?|modified?|created?|updated?):\s*(.+\.(?:ts|js|py|json|yaml|yml|md))/gi,
-    /(?:src|lib|test|tests)\/[\w/\-.]+\.(?:ts|js|py)/gi,
-  ];
-
-  const filesChanged: string[] = [];
-  for (const pattern of filePatterns) {
-    const matches = text.matchAll(pattern);
-    for (const m of matches) {
-      const file = m[1] || m[0];
-      if (!filesChanged.includes(file)) {
-        filesChanged.push(file);
-      }
-    }
-  }
-
-  const cmdPattern = /(?:`|\$)\s*((?:npm|pnpm|yarn|git|python|pytest|tsc|eslint|ruff|codex)\s+[^\n`]+)/gi;
-  const commands: string[] = [];
-  const cmdMatches = text.matchAll(cmdPattern);
-  for (const m of cmdMatches) {
-    if (!commands.includes(m[1])) {
-      commands.push(m[1].trim());
-    }
-  }
-
-  return {
-    success: !failed,
-    summary: extractSummary(text),
-    filesChanged: filesChanged.slice(0, 10),
-    commands: commands.slice(0, 10),
-    output: text,
-    error: failed ? extractErrorMessage(text) : undefined,
-  };
-}
-
-// Detect a real failure declaration, not incidental "error"/"fail" prose (see gpt.ts).
-function isExplicitFailure(text: string): boolean {
-  if (/"success"\s*:\s*false/i.test(text)) return true;
-  return /\b(failed to|unable to|could not|couldn['’]t|cannot (?:complete|finish|proceed|continue)|giving up|abort(?:ed|ing))\b/i.test(text);
-}
-
-function extractSummary(text: string): string {
-  const lines = text.split('\n').filter((l) => l.trim().length > 10);
-  if (lines.length === 0) return t('common.fallback.noSummary');
-  const summary = lines[0].trim();
-  return summary.length > 200 ? `${summary.slice(0, 200)}...` : summary;
-}
-
-function extractErrorMessage(text: string): string {
-  const errorMatch = text.match(/(?:error|exception|failed?):\s*(.+)/i);
-  if (errorMatch) {
-    return errorMatch[1].slice(0, 200);
-  }
-  const lines = text.split('\n').filter((l) => /error|fail/i.test(l));
-  if (lines.length > 0) {
-    return lines[0].slice(0, 200);
-  }
-  return 'Unknown error';
-}
-
-function extractReviewerResultJson(text: string): ReviewResult | null {
-  const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
-  if (!jsonMatch) {
-    const objMatch = text.match(/\{\s*"decision"\s*:/);
-    if (!objMatch) return null;
-
-    const startIdx = objMatch.index!;
-    let depth = 0;
-    let endIdx = startIdx;
-
-    for (let i = startIdx; i < text.length; i++) {
-      if (text[i] === '{') depth++;
-      if (text[i] === '}') {
-        depth--;
-        if (depth === 0) {
-          endIdx = i + 1;
-          break;
-        }
-      }
-    }
-
-    try {
-      return normalizeReviewResult(JSON.parse(text.slice(startIdx, endIdx)));
-    } catch {
-      return null;
-    }
-  }
-
-  try {
-    return normalizeReviewResult(JSON.parse(jsonMatch[1]));
-  } catch {
-    return null;
-  }
-}
-
-function extractReviewerFromText(text: string): ReviewResult {
-  const lower = text.toLowerCase();
-  const decision = lower.includes('approve')
-    ? 'approve'
-    : lower.includes('reject')
-      ? 'reject'
-      : 'revise';
-
-  return {
-    decision,
-    feedback: extractSummary(text),
-    issues: extractBulletsAfter(text, /issues?:/i),
-    suggestions: extractBulletsAfter(text, /suggestions?:/i),
-  };
-}
-
-function normalizeReviewResult(parsed: Record<string, unknown>): ReviewResult {
-  const decision = parsed.decision === 'approve' || parsed.decision === 'reject'
-    ? parsed.decision
-    : 'revise';
-
-  return {
-    decision,
-    feedback: typeof parsed.feedback === 'string' ? parsed.feedback : t('common.fallback.noSummary'),
-    issues: Array.isArray(parsed.issues)
-      ? parsed.issues.filter((v): v is string => typeof v === 'string')
-      : [],
-    suggestions: Array.isArray(parsed.suggestions)
-      ? parsed.suggestions.filter((v): v is string => typeof v === 'string')
-      : [],
-  };
-}
-
-function extractBulletsAfter(text: string, heading: RegExp): string[] {
-  const lines = text.split('\n');
-  const start = lines.findIndex((line) => heading.test(line));
-  if (start < 0) return [];
-
-  const items: string[] = [];
-  for (const line of lines.slice(start + 1)) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      if (items.length > 0) break;
-      continue;
-    }
-    if (!trimmed.startsWith('-') && !trimmed.startsWith('*')) {
-      if (items.length > 0) break;
-      continue;
-    }
-    items.push(trimmed.replace(/^[-*]\s*/, ''));
-  }
-  return items;
 }
 
 function truncate(s: string, max: number): string {

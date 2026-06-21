@@ -139,15 +139,19 @@ describe('OpenRouterCliAdapter', () => {
     expect(body.reasoning).toBeUndefined();
   });
 
-  it('leaves OpenAI/Gemini messages untouched (auto-cached by OpenRouter)', () => {
+  it('applies cache markers to non-Anthropic models too (vega "safest" pattern)', () => {
+    // Changed from the old Anthropic-only guard: markers go on ALL models — Anthropic needs them,
+    // OpenAI/Gemini auto-cache and ignore them harmlessly (vega llm_gateway.py:528).
     const msgs: ChatMessage[] = [
       { role: 'system', content: 'sys' },
       { role: 'user', content: 'u1' },
       { role: 'assistant', content: 'a1' },
       { role: 'user', content: 'u2' },
     ];
-    const out = applyPromptCaching(msgs, 'openai/gpt-5');
-    expect(out).toBe(msgs); // same reference, no transform
+    const out = applyPromptCaching(msgs, 'openai/gpt-5') as Array<Record<string, unknown>>;
+    expect(out).not.toBe(msgs); // transformed (no longer a passthrough)
+    // system message (idx 0) gets a cache_control breakpoint
+    expect(out[0].content).toEqual([{ type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } }]);
   });
 
   it('inserts cache_control breakpoints for Anthropic models', () => {

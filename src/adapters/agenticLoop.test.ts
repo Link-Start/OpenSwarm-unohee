@@ -7,7 +7,7 @@
 // ============================================
 
 import { describe, it, expect } from 'vitest';
-import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, type ChatMessage } from './agenticLoop.js';
+import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, type ChatMessage } from './agenticLoop.js';
 import type { ToolCall } from './tools.js';
 
 describe('progress-based stop helpers', () => {
@@ -33,14 +33,14 @@ describe('progress-based stop helpers', () => {
 });
 
 describe('read-loop guard (shouldNudgeReadLoop)', () => {
-  const MAX = 20; // maxTurns - 2 = 18 → near-budget boundary (fires late, not at halfway)
-  it('nudges when no edits and near the turn budget', () => {
+  const MAX = 20; // maxTurns is no longer used by the guard — it fires at a fixed EARLY turn
+  it('nudges when no edits and past the early threshold (READ_LOOP_NUDGE_AT)', () => {
+    expect(shouldNudgeReadLoop(0, 0, 3, READ_LOOP_NUDGE_AT, MAX)).toBe(true);
+    expect(shouldNudgeReadLoop(0, 0, 3, 10, MAX)).toBe(true);
     expect(shouldNudgeReadLoop(0, 0, 3, 18, MAX)).toBe(true);
-    expect(shouldNudgeReadLoop(0, 0, 3, 19, MAX)).toBe(true);
   });
-  it('does not nudge mid-investigation (still legitimately exploring)', () => {
-    expect(shouldNudgeReadLoop(0, 0, 3, 17, MAX)).toBe(false);
-    expect(shouldNudgeReadLoop(0, 0, 3, 10, MAX)).toBe(false);
+  it('does not nudge before the early threshold (still legitimately exploring)', () => {
+    expect(shouldNudgeReadLoop(0, 0, 3, READ_LOOP_NUDGE_AT - 1, MAX)).toBe(false);
     expect(shouldNudgeReadLoop(0, 0, 3, 0, MAX)).toBe(false);
   });
   it('does not nudge once at least one edit has happened', () => {
