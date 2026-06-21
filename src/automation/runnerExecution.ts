@@ -7,6 +7,7 @@ import { EmbedBuilder } from 'discord.js';
 import type { TaskItem, DecisionResult } from '../orchestration/decisionEngine.js';
 import type { ExecutorResult } from '../orchestration/workflow.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
+import type { WorkerResult } from '../agents/agentPair.js';
 import type { DefaultRolesConfig, PipelineStage, JobProfile } from '../core/types.js';
 import { createPipelineFromConfig, buildTaskPrefix } from '../agents/pairPipeline.js';
 import { formatParsedTaskSummary, loadParsedTask } from '../orchestration/taskParser.js';
@@ -722,8 +723,17 @@ export async function executePipeline(
 
     const taskPrefix = buildTaskPrefix(task, actualPath);
 
-    pipeline.on('stage:start', ({ stage }) => {
+    pipeline.on('stage:start', async ({ stage }) => {
       console.log(`[${taskPrefix}] Stage started: ${stage}`);
+      // INT-1612: leave an audit trail on the issue — what the worker was instructed to do.
+      // Works for Linear AND the local SQLite source (addComment → issue event log).
+      if (stage === 'worker' && task.issueId) {
+        const instr = (task.description || '').replace(/\s+/g, ' ').trim();
+        const body = `🛠️ Worker started — ${task.title}`
+          + (instr ? `\n\n${instr.slice(0, 300)}${instr.length > 300 ? '…' : ''}` : '');
+        await taskSource?.addComment(task.issueId, body)
+          .catch((err) => console.warn(`[${taskPrefix}] worker-start audit comment failed:`, err));
+      }
     });
 
     const taskReportCtx = {
@@ -735,6 +745,17 @@ export async function executePipeline(
     pipeline.on('stage:complete', async ({ stage, result }) => {
       console.log(`[${taskPrefix}] Stage completed: ${stage}, success=${result.success}`);
       await reportStageResult(stage, result, ctx.reportToDiscord, taskReportCtx);
+      // INT-1612: audit trail — what the worker actually did (files/commands/confidence/halt).
+      if (stage === 'worker' && task.issueId && result.result) {
+        const wr = result.result as WorkerResult;
+        const extra: string[] = [];
+        if (typeof wr.confidencePercent === 'number') extra.push(`confidence ${wr.confidencePercent}%`);
+        if (wr.haltReason) extra.push(`halt: ${wr.haltReason}`);
+        const body = `🛠️ Worker result\n\n${workerAgent.formatWorkReport(wr, taskReportCtx)}`
+          + (extra.length ? `\n\n${extra.join(' · ')}` : '');
+        await taskSource?.addComment(task.issueId, body)
+          .catch((err) => console.warn(`[${taskPrefix}] worker audit comment failed:`, err));
+      }
     });
 
     pipeline.on('revision:start', ({ stage }) => {
