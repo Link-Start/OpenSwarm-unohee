@@ -20,7 +20,7 @@ import { getProjectGitInfo, startGitStatusPoller } from './gitStatus.js';
 import { getActiveMonitors, registerMonitor, unregisterMonitor } from '../automation/longRunningMonitor.js';
 import type { LongRunningMonitorConfig } from '../core/types.js';
 import { getAllProcesses, killProcess, startHealthChecker } from '../adapters/processRegistry.js';
-import { setDefaultAdapter } from '../adapters/index.js';
+import { setDefaultAdapter, getDefaultAdapterName } from '../adapters/index.js';
 import * as memory from '../memory/index.js';
 import { fetchQuota } from './quotaTracker.js';
 import { PairPipeline, type PipelineResult } from '../agents/pairPipeline.js';
@@ -644,8 +644,15 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           ? '## Relevant Past Discussions\n' + memories.map(m => `- ${m.content.replace(/^Q: |^A: /g, '')}`).join('\n')
           : '';
 
-        const provider = runnerRef?.getAdapterSummary().defaultAdapter ?? 'codex';
-        const model = runnerRef?.getAdapterSummary().worker?.model ?? getDefaultChatModel(provider);
+        // Use the LIVE default adapter (set by config/provider toggle), not getAdapterSummary's
+        // this.config.defaultAdapter which is undefined on boot → wrongly falls back to 'codex'.
+        // That mis-routed the dashboard chat to a dead codex path with the literal placeholder model
+        // "(adapter default)", so codex exec returned nothing → "[No response]" (INT-1658).
+        const provider = getDefaultAdapterName();
+        const summaryModel = runnerRef?.getAdapterSummary().worker?.model;
+        const model = (summaryModel && summaryModel !== '(adapter default)')
+          ? summaryModel
+          : getDefaultChatModel(provider);
 
         const contextPrompt = [
           'You are OpenSwarm, an autonomous code development supervisor.',
