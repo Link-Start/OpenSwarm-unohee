@@ -10,6 +10,7 @@ import type { PRInfo } from '../github/github.js';
 import { getPRBaseBranch, commentOnPR } from '../github/github.js';
 import { isOwnedPR, getOwnedPRsForRepo } from './prOwnership.js';
 import { runWorker } from '../agents/worker.js';
+import { getDefaultAdapterName } from '../adapters/index.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import { reportEvent } from '../discord/index.js';
 
@@ -185,6 +186,7 @@ export class ConflictResolver {
         if (conflictedFiles.length > 0) {
           console.log(`[ConflictResolver] ${key}: ${conflictedFiles.length} conflicted files: ${conflictedFiles.join(', ')}`);
 
+          const onCodex = ['codex', 'codex-responses'].includes(getDefaultAdapterName());
           const workerResult = await runWorker({
             taskTitle: `Resolve merge conflicts: ${pr.title}`,
             taskDescription: [
@@ -205,7 +207,12 @@ export class ConflictResolver {
               `6. Ensure the resolved code compiles and makes logical sense.`,
             ].join('\n'),
             projectPath,
-            model: this.config.workerModel,
+            // When the active provider is Codex, resolve conflicts with GPT-5.5 at high reasoning
+            // effort (user choice — conflicts are rare and worth the strongest pass). Otherwise use
+            // the configured strong model (gemini-2.5-pro via openrouter). adapterName is left unset
+            // so the worker uses the current default adapter, which matches the model family above.
+            model: onCodex ? 'gpt-5.5' : this.config.workerModel,
+            reasoningEffort: onCodex ? 'high' : undefined,
             timeoutMs: this.config.workerTimeoutMs || 300_000,
             // Conflict resolution REQUIRES edits (remove <<<<<<< markers, merge both sides). Without
             // the no-edit nudge a read-heavy model (qwen) ends with analysis only → "worker failed -

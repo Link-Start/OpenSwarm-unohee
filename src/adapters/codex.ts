@@ -65,7 +65,12 @@ export class CodexCliAdapter implements CliAdapter {
     const promptFile = options.prompt;
     const resolvedModel = options.model ? coerceCodexModel(options.model) : undefined;
     const modelFlag = resolvedModel ? ` -m ${shellEscape(resolvedModel)}` : '';
-    const cmd = `cat ${shellEscape(promptFile)} | codex exec --json --full-auto --skip-git-repo-check${modelFlag}`;
+    // Reasoning effort → codex config override (`-c model_reasoning_effort=...`). The CLI has no
+    // dedicated effort flag, so we set it via the same `-c key=value` mechanism it uses for config.
+    const effortFlag = options.reasoningEffort
+      ? ` -c ${shellEscape(`model_reasoning_effort=${options.reasoningEffort}`)}`
+      : '';
+    const cmd = `cat ${shellEscape(promptFile)} | codex exec --json --full-auto --skip-git-repo-check${modelFlag}${effortFlag}`;
     return { command: cmd, args: [] };
   }
 
