@@ -389,26 +389,25 @@ export class AutonomousRunner {
     const filtered = tasks.filter(task => {
       const id = task.issueId || task.id;
 
-      // Check rejection limit first
-      if (isRejectionLimitReached(id)) {
-        return false; // Skip tasks that hit max rejection limit
-      }
-
-      // Recover a blocked issue ONLY when a human re-queued it by moving it to Todo.
-      // This previously also matched 'In Progress'/'In Review' — but syncFailureState
-      // leaves a system-blocked task in 'In Progress' on Linear, so that match treated
-      // the system's own leftover state as a manual revert and cleared the task's
-      // rejection/failure counts every heartbeat. The counts then never reached the
-      // limit, the block never stuck, and the task (plus everything depending on it)
-      // looped forever — starving the backlog. Todo is the state a human actually
-      // moves an issue to when they want it retried.
-      if (task.linearState === 'Todo' && (this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT)) {
+      // Recover a blocked issue when a human (or the dashboard RESTART button) re-queued it by
+      // moving it to Todo. This MUST run BEFORE the rejection-limit check, and its trigger MUST
+      // include the rejection limit — otherwise a 3-rejection task stays blocked forever even after
+      // being moved to Todo (the RESTART button only changes Linear state, never the OpenSwarm
+      // rejection count, so the isRejectionLimitReached check below would skip it first).
+      // Only 'Todo' counts (a human's deliberate retry); In Progress is syncFailureState's own
+      // leftover state and must NOT be treated as a manual revert (that looped forever before).
+      if (task.linearState === 'Todo' && (isRejectionLimitReached(id) || this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT)) {
         this.completedTaskIds.delete(id);
         this.failedTaskCounts.delete(id);
         clearRejection(id); // Clear rejection count on recovery
         clearRetryTime(id, this.failedTaskRetryTimes); // Clear retry backoff time
         recovered++;
         return true;
+      }
+
+      // Non-Todo tasks that hit the rejection limit stay blocked.
+      if (isRejectionLimitReached(id)) {
+        return false; // Skip tasks that hit max rejection limit
       }
 
       if (this.completedTaskIds.has(id)) return false;
