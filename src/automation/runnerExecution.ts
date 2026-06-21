@@ -43,6 +43,7 @@ import {
   markTaskDecomposed,
   markTaskDone,
   markTaskInProgress,
+  getTaskState,
   releaseDependentTasks,
   upsertTaskState,
 } from '../taskState/store.js';
@@ -387,21 +388,21 @@ export async function createSubIssuesWithDependencies(
         blockedReason: isReady ? undefined : `Waiting on dependencies: ${dependencyIssueIds.join(', ')}`,
         retryCount: 0,
       },
-      linearState: isReady ? 'Todo' : 'Backlog',
+      // Decomposed children are work-to-do → always Todo, never Backlog. Dependency ORDER is
+      // enforced separately by the decision engine via execution.status='blocked' +
+      // blockedReason (it skips a child until its deps resolve), so there's no reason to bury
+      // a blocked child in Backlog where it reads as un-triaged work and never gets drained.
+      linearState: 'Todo',
     });
 
     try {
-      if (isReady) {
-        await taskSource?.updateState(subIssue.id, 'Todo');
-        console.log(`[AutonomousRunner] Moved ${subIssue.identifier} to Todo`);
-      } else {
-        console.log(`[AutonomousRunner] Keeping ${subIssue.identifier} in Backlog until dependencies resolve`);
-      }
+      await taskSource?.updateState(subIssue.id, 'Todo');
+      console.log(`[AutonomousRunner] Created ${subIssue.identifier} in Todo${isReady ? '' : ' (waits on deps)'}`);
       await taskSource?.addComment(
         subIssue.id,
         buildTaskStateSyncComment(
           childState,
-          isReady ? 'Task ready after decomposition' : 'Task blocked by decomposition dependency'
+          isReady ? 'Task ready after decomposition' : 'Task created (waiting on decomposition dependency)'
         )
       );
     } catch (err) {
@@ -639,7 +640,16 @@ export async function executePipeline(
 
   if (ctx.enableDecomposition) {
     const threshold = ctx.decompositionThresholdMinutes ?? 30;
-    const needsDecomp = planner.needsDecomposition(task, threshold, true); // heuristic pre-filter
+    // Guard against RE-decomposing a parent that already has children. needsDecomposition runs
+    // the planner on EVERY pick, so without this an already-decomposed parent gets split again
+    // each time it's selected → duplicate sub-issues flooding the backlog (the bug seen with the
+    // repeated "[Bench] FTS5 vs BGE-M3" children).
+    const existing = task.issueId ? getTaskState(task.issueId) : undefined;
+    const alreadyDecomposed = (existing?.childIssueIds?.length ?? 0) > 0;
+    if (alreadyDecomposed) {
+      console.log(`[AutonomousRunner] ${task.issueIdentifier} already decomposed (${existing!.childIssueIds.length} children) — skipping re-decomposition`);
+    }
+    const needsDecomp = !alreadyDecomposed && planner.needsDecomposition(task, threshold, true); // heuristic pre-filter
 
     if (needsDecomp) {
       const estimated = planner.estimateTaskDuration(task);
