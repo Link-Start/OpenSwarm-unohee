@@ -6,7 +6,6 @@ import {
   enrichTaskFromState,
   markTaskDone,
   completeParentIfChildrenDone,
-  buildTaskStateSyncComment,
   hydrateTaskStateFromComments,
 } from './store.js';
 
@@ -106,22 +105,21 @@ describe('task state store', () => {
     expect(parent?.linearState).toBe('Done');
   });
 
-  it('hydrates canonical state from the latest Linear sync comment', () => {
-    const older = buildTaskStateSyncComment(
-      upsertTaskState('ISSUE-9', {
-        linearState: 'Backlog',
-        execution: { status: 'blocked', retryCount: 0 },
-      }),
-      'Task blocked'
-    );
+  it('hydrates canonical state from old-format (marker) sync comments — latest wins', () => {
+    // New comments no longer embed machine state (the JSON marker showed up raw in Linear's
+    // markdown). hydrateTaskStateFromComments is now a BACK-COMPAT path that reads OLD marker
+    // comments only; build them literally here — exactly what the old emitter produced.
+    const mkOld = (state: ReturnType<typeof upsertTaskState>) =>
+      `🧭 sync\n<!-- openswarm:task-state:v1 ${JSON.stringify(state)} -->`;
 
-    const latest = buildTaskStateSyncComment(
-      upsertTaskState('ISSUE-9', {
-        linearState: 'Done',
-        execution: { status: 'done', retryCount: 0 },
-      }),
-      'Task completed'
-    );
+    const older = mkOld(upsertTaskState('ISSUE-9', {
+      linearState: 'Backlog',
+      execution: { status: 'blocked', retryCount: 0 },
+    }));
+    const latest = mkOld(upsertTaskState('ISSUE-9', {
+      linearState: 'Done',
+      execution: { status: 'done', retryCount: 0 },
+    }));
 
     const hydrated = hydrateTaskStateFromComments('ISSUE-9', [
       { body: older, createdAt: '2026-03-18T00:00:00.000Z' },

@@ -23,12 +23,16 @@ describe('systemPrompt', () => {
     expect(koPrompts.systemPrompt).toContain('git reset --hard');
   });
 
-  it('en: is compact (under 600 chars)', () => {
-    expect(enPrompts.systemPrompt.length).toBeLessThan(600);
+  // Guards against runaway bloat in the BASE system prompt (sent every turn). The cap was raised
+  // from 600 after deliberate additions (intent narration, deliverable rules, "don't touch git").
+  // ~2KB / ~500 tokens is still small — the real context-bloat risk is the per-task worker context
+  // (registry/snapshot), not this base prompt.
+  it('en: is compact (under 2400 chars)', () => {
+    expect(enPrompts.systemPrompt.length).toBeLessThan(2400);
   });
 
-  it('ko: is compact (under 600 chars)', () => {
-    expect(koPrompts.systemPrompt.length).toBeLessThan(600);
+  it('ko: is compact (under 2400 chars)', () => {
+    expect(koPrompts.systemPrompt.length).toBeLessThan(2400);
   });
 });
 
