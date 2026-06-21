@@ -129,6 +129,7 @@ ${feedbackSection}${contextSection}
 - Before completing: verify all changed files exist, no syntax errors, confidence reflects reality.
 - If verification is part of the task (tests/scripts), RUN it and paste the ACTUAL output into your summary — reviewers need evidence it passed, not just that a test file exists.
 - STAGE every new or changed file with \`git add -A\` before finishing. Untracked files are invisible to the reviewer's git diff and get treated as missing/incomplete.
+- **Produce the deliverable, not just the code.** If the task description / completion criteria call for an artifact (a report, benchmark results, a generated data file, a document), do NOT stop at "wrote the script" — actually GENERATE that artifact: run the script to fill it with real data, then commit it. "Script written but no result artifact" is incomplete, not done, and is the single most common reason the reviewer asks for revision.
 - If the repo lacks what the task needs, CREATE it (edit_file/write_file). After 1-2 reads, edit — don't loop on read/search.
 
 ## Tools available
