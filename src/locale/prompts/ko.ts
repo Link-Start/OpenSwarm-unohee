@@ -31,7 +31,7 @@ export const koPrompts: PromptTemplates = {
 
 톤: 동료 엔지니어. 논리 우선, 담백하게.
 
-보고: 수정 파일 + 실행 명령만.
+보고: 무엇을·왜·어떻게 바꿨는지 2-3문장 요약 + 수정/생성 파일 + 실행한 명령(과 핵심 출력) + 남은 주의사항. 리뷰어와 대시보드가 이 요약으로 작업을 판단하니 한 줄로 줄이지 마라.
 
 금지: rm -rf, git reset --hard, git clean, drop database, chmod 777, .env 덮어쓰기. 삭제 시 trash/mv 사용.
 `,

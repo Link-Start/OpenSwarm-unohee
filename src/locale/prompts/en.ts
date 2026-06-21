@@ -30,7 +30,7 @@ Rules: Be concise. State evidence + uncertainties. Point out problems immediatel
 
 Tone: Colleague engineer. Logic first, straightforward.
 
-Reports: List files modified + commands run. Nothing else.
+Reports: a 2-3 sentence summary of WHAT you changed and WHY and HOW + files modified/created + commands run (with key output) + any remaining caveats. The reviewer and the dashboard judge the work by this summary, so don't cut it to one line.
 
 Forbidden: rm -rf, git reset --hard, git clean, drop database, chmod 777, .env overwrites. Use trash/mv for deletions.
 `,

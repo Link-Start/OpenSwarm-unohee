@@ -1458,8 +1458,20 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     // ---- Pipeline Stages ----
     function addStageRow(data) {
-      stageRows.push(data);
-      if (stageRows.length > MAX_STAGE) stageRows = stageRows.slice(-MAX_STAGE);
+      // Merge start + complete into ONE row per (taskId, stage) so the pipeline view doesn't
+      // spam a new row for every event. If a row for this stage exists, update it in place
+      // (start → complete/fail, carrying the latest payload); otherwise append a new row.
+      var key = (data.taskId || "") + "|" + (data.stage || "");
+      var idx = -1;
+      for (var i = stageRows.length - 1; i >= 0; i--) {
+        if (((stageRows[i].taskId || "") + "|" + (stageRows[i].stage || "")) === key) { idx = i; break; }
+      }
+      if (idx >= 0) {
+        stageRows[idx] = Object.assign({}, stageRows[idx], data);
+      } else {
+        stageRows.push(data);
+        if (stageRows.length > MAX_STAGE) stageRows = stageRows.slice(-MAX_STAGE);
+      }
       renderStages();
     }
     function shortModel(name) {
