@@ -46,7 +46,6 @@ import { pruneWorktrees } from '../support/worktreeManager.js';
 import { refreshGraph, toProjectSlug } from '../knowledge/index.js';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
 import { detectFileConflicts } from '../orchestration/conflictDetector.js';
-import { checkQuotaAllowance } from '../support/quotaTracker.js';
 import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 import type { AdapterName } from '../adapters/types.js';
 
@@ -624,16 +623,10 @@ export class AutonomousRunner {
       }
       this.syslog('✓ Time window: allowed');
 
-      // 1.5 Quota gate — skip heartbeat if Claude Max quota is too high
-      const quotaCheck = await checkQuotaAllowance(80);
-      if (!quotaCheck.allowed) {
-        console.log(`[AutonomousRunner] Quota gate: SKIP — ${quotaCheck.reason}`);
-        broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'quota', line: `⏸ ${quotaCheck.reason}` } });
-        return;
-      }
-      if (quotaCheck.utilization !== undefined && quotaCheck.utilization > 60) {
-        console.log(`[AutonomousRunner] Quota warning: ${quotaCheck.utilization.toFixed(0)}% utilization`);
-      }
+      // 1.5 Quota gate (removed): the worker runs on codex (ChatGPT OAuth), so gating on
+      // Anthropic Claude Max quota was meaningless — and it polled api.anthropic.com/oauth/usage
+      // every heartbeat, which produced the 429 noise. Speed is governed by the cron schedule
+      // and the Linear rate limiter, not by an Anthropic quota check.
 
       // 1.6 Pace gate (removed)
       // The 5h rolling window cap (globalCap = projects × dailyTaskCap) and
