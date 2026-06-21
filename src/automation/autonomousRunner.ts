@@ -380,7 +380,6 @@ export class AutonomousRunner {
   private filterAlreadyProcessed(tasks: TaskItem[]): TaskItem[] {
     let recovered = 0;
     let backoffSkipped = 0;
-    const recoverableStates = new Set(['Todo', 'In Progress', 'In Review']);
     const filtered = tasks.filter(task => {
       const id = task.issueId || task.id;
 
@@ -389,9 +388,15 @@ export class AutonomousRunner {
         return false; // Skip tasks that hit max rejection limit
       }
 
-      // Recover issues in active states from completed/failed list
-      // (user or system intentionally moved back to active, so retry)
-      if (recoverableStates.has(task.linearState || '') && (this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT)) {
+      // Recover a blocked issue ONLY when a human re-queued it by moving it to Todo.
+      // This previously also matched 'In Progress'/'In Review' — but syncFailureState
+      // leaves a system-blocked task in 'In Progress' on Linear, so that match treated
+      // the system's own leftover state as a manual revert and cleared the task's
+      // rejection/failure counts every heartbeat. The counts then never reached the
+      // limit, the block never stuck, and the task (plus everything depending on it)
+      // looped forever — starving the backlog. Todo is the state a human actually
+      // moves an issue to when they want it retried.
+      if (task.linearState === 'Todo' && (this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT)) {
         this.completedTaskIds.delete(id);
         this.failedTaskCounts.delete(id);
         clearRejection(id); // Clear rejection count on recovery
