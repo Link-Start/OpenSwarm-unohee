@@ -949,27 +949,13 @@ export class PairPipeline extends EventEmitter {
           const testerResult = await this.runStage('tester', context);
           stages.push(testerResult);
 
-          if (!testerResult.success && !this.config.continueOnTestFail) {
-            // Tests failed → revise now, before spending a review pass on broken code
-            console.log(`[${context.taskPrefix}] Tester failed, retrying...`);
-            agentPair.trackFailure(context.session.id);
-
-            if (context.testerResult) {
-              context.reviewResult = {
-                decision: 'revise',
-                feedback: testerAgent.buildTestFixPrompt(context.testerResult),
-                issues: context.testerResult.failedTests,
-                suggestions: context.testerResult.suggestions,
-              };
-            }
-
-            this.emit('iteration:fail', {
-              iteration: context.currentIteration,
-              stage: 'tester',
-              context,
-            });
-            agentPair.updateSessionStatus(context.session.id, 'revising');
-            continue;
+          if (!testerResult.success) {
+            // Do NOT auto-revise on a test failure. The tester result is forwarded to the
+            // reviewer (context.testerResult → review prompt), which judges code + test results
+            // together. A pre-existing / unrelated failure — e.g. a project-wide pytest config
+            // (addopts in pytest.ini) breaking the whole suite — must not force a revision on
+            // its own; only the reviewer decides, seeing both the diff and the test outcome.
+            console.log(`[${context.taskPrefix}] Tester reported failures — forwarding results to the reviewer to judge (not auto-revising)`);
           }
         } // end else (has code change)
       }
