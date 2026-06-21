@@ -97,7 +97,11 @@ export async function runPlanner(options: PlannerOptions): Promise<PlannerResult
   const prompt = buildPlannerPrompt(options) + READ_ONLY_GUARD;
 
   try {
-    const adapter = getAdapter(options.adapterName);
+    // Route by model prefix: a 'provider/model' id (qwen/…, google/…) → OpenRouter; a bare codex
+    // model id (gpt-5.5) → the default adapter. Lets plannerModel alone pick the adapter, so the
+    // planner can run on a cheap tool-capable model independent of the worker's codex adapter.
+    const adapterName = options.adapterName ?? (options.model?.includes('/') ? 'openrouter' : undefined);
+    const adapter = getAdapter(adapterName);
     const cwd = expandPath(options.projectPath);
     // Drop Claude-CLI-style model ids (e.g. `claude-opus-4-7`) — they are not
     // valid on the openrouter/local adapters; fall back to the adapter default.
