@@ -41,6 +41,7 @@ export interface SubTask {
   estimatedMinutes: number;
   priority: number;  // 1-4 (1=Urgent)
   dependencies?: string[];  // Prerequisite sub-task titles
+  fileScope?: string[];  // Files/modules this sub-task will modify — used for parallel conflict detection
 }
 
 export interface PlannerResult {

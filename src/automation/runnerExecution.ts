@@ -247,6 +247,7 @@ export async function createSubIssuesWithDependencies(
     dependencies: string[];
     topoRank: number;
     estimatedMinutes: number;
+    fileScope: string[];
   }> = [];
 
   for (const [index, subTask] of subTasks.entries()) {
@@ -254,8 +255,13 @@ export async function createSubIssuesWithDependencies(
       ? `\n\n${t('runner.decomposition.prerequisite', { deps: subTask.dependencies.join(', ') })}`
       : '';
 
+    const fileScope = (subTask.fileScope ?? []).filter((f) => typeof f === 'string' && f.trim().length > 0);
+    const scopeStr = fileScope.length
+      ? `\n\nFile scope: ${fileScope.join(', ')}`
+      : '';
+
     const subDescription = `${subTask.description}\n\n` +
-      `${t('runner.decomposition.estimatedTime', { n: String(subTask.estimatedMinutes) })}${depsStr}\n\n` +
+      `${t('runner.decomposition.estimatedTime', { n: String(subTask.estimatedMinutes) })}${depsStr}${scopeStr}\n\n` +
       t('runner.decomposition.autoDecomposed', { parentTitle: task.title });
 
     const subResult = taskSource
@@ -278,6 +284,7 @@ export async function createSubIssuesWithDependencies(
       dependencies: subTask.dependencies || [],
       topoRank: index,
       estimatedMinutes: subTask.estimatedMinutes,
+      fileScope,
     });
 
     console.log(`[AutonomousRunner] Created sub-issue: ${subResult.identifier}`);
@@ -350,6 +357,7 @@ export async function createSubIssuesWithDependencies(
       parentIssueId: parentIssueId,
       dependencyIssueIds,
       dependencyTitles: subIssue.dependencies,
+      fileScope: subIssue.fileScope,
       topoRank: subIssue.topoRank,
       execution: {
         status: isReady ? 'todo' : 'blocked',

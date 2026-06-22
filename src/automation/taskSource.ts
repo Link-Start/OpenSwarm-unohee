@@ -13,6 +13,7 @@ import { getIssueStore } from '../issues/index.js';
 import type { IIssueStore } from '../issues/sqliteStore.js';
 import type { Issue, IssueStatus, IssuePriority } from '../issues/schema.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
+import { enrichTaskFromState } from '../taskState/store.js';
 
 /** The runner's task-state vocabulary (mirrors Linear's updateIssueState states). */
 export type TaskState = 'In Progress' | 'In Review' | 'Done' | 'Backlog' | 'Todo';
@@ -115,7 +116,9 @@ export class SqliteTaskSource implements ITaskSource {
 
   async fetchTasks(): Promise<TaskItem[]> {
     const { issues } = this.store.listIssues({ status: ['todo', 'in_progress'], limit: 200, offset: 0 });
-    return issues.map(issueToTask);
+    // Enrich from canonical task state so planner-declared fileScope (plus
+    // dependency/topoRank data) reaches the runner — mirrors the Linear path.
+    return issues.map((issue) => enrichTaskFromState(issueToTask(issue)));
   }
   async createTask(title: string, description: string, projectId?: string): Promise<SubIssueResult> {
     try {

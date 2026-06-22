@@ -6,7 +6,6 @@
 
 import type { TaskItem } from './decisionEngine.js';
 import { analyzeIssue } from '../knowledge/index.js';
-import type { ImpactAnalysis } from '../knowledge/types.js';
 
 // Types
 
@@ -61,8 +60,27 @@ class UnionFind {
 // Conflict Detection
 
 /**
- * Knowledge Graph를 사용하여 태스크 간 파일 영향 범위 겹침을 감지.
- * 겹치는 태스크를 ConflictGroup으로 묶고, 각 그룹에서 최고 우선순위만 safe로 반환.
+ * Normalize a file/module identifier so two declarations of the same path
+ * compare equal: lowercase, trim, strip a leading `./`. Empty/blank entries
+ * are dropped.
+ */
+function normalizeScope(entries: string[] | undefined): Set<string> {
+  const out = new Set<string>();
+  if (!entries) return out;
+  for (const raw of entries) {
+    if (typeof raw !== 'string') continue;
+    const normalized = raw.trim().replace(/^\.\//, '').toLowerCase();
+    if (normalized) out.add(normalized);
+  }
+  return out;
+}
+
+/**
+ * Detect file-scope overlap between tasks. Each task's scope prefers the
+ * planner-declared `fileScope` (authoritative), falling back to Knowledge Graph
+ * inference (`analyzeIssue`) only when no explicit scope is available.
+ * Overlapping tasks are grouped into a ConflictGroup; only the highest-priority
+ * task in each group is returned as safe to run concurrently.
  */
 export async function detectFileConflicts(
   tasks: TaskItem[],
@@ -74,16 +92,23 @@ export async function detectFileConflicts(
 
   // Step 1: 각 태스크의 영향 모듈 집합 수집
   const taskImpacts: Map<number, Set<string>> = new Map();
-  const impactResults: Map<number, ImpactAnalysis | null> = new Map();
 
   await Promise.all(
     tasks.map(async (task, idx) => {
-      const impact = await analyzeIssue(projectPath, task.title, task.description);
-      impactResults.set(idx, impact);
+      // Prefer the planner-declared file scope. It is what the worker is
+      // actually constrained to, so it is more accurate than KG inference and
+      // needs no graph lookup.
+      const declared = normalizeScope(task.fileScope);
+      if (declared.size > 0) {
+        taskImpacts.set(idx, declared);
+        return;
+      }
 
+      // Fall back to Knowledge Graph inference when no explicit scope exists.
+      const impact = await analyzeIssue(projectPath, task.title, task.description);
       if (impact) {
-        const modules = new Set([...impact.directModules, ...impact.dependentModules]);
-        taskImpacts.set(idx, modules);
+        const modules = normalizeScope([...impact.directModules, ...impact.dependentModules]);
+        if (modules.size > 0) taskImpacts.set(idx, modules);
       }
     })
   );

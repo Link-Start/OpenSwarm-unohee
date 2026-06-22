@@ -254,6 +254,16 @@ ${draftSection}${kgSection}
 - 명확하고 구체적인 제목 사용
 - 의존성이 있으면 순서대로 번호 매기기
 
+## File Scope (병렬 실행을 위해 필수)
+각 서브태스크에 \`fileScope\`를 선언하라: 생성·수정할 구체적 파일/모듈
+(repo 상대 경로, 예: \`src/foo/bar.ts\`). 워커는 격리된 git 워크트리에서 동시에 실행되므로
+같은 파일을 건드리는 두 서브태스크는 머지 시 충돌한다:
+- 서브태스크가 병렬 실행될 수 있도록 \`fileScope\`를 서로 겹치지 않게 분리하라
+- 두 서브태스크가 같은 파일을 수정해야 하면, 하나로 합치거나 한쪽을 다른 쪽의
+  \`dependencies\`로 지정해 순차 실행되게 하라
+- \`fileScope\`는 분석(관련 파일/영향 모듈)에 근거해 작성하라. 정말 알 수 없으면
+  빈 배열을 반환하라 — 경로를 지어내지 마라
+
 ## Output Format (JSON)
 분석 결과를 다음 JSON 형식으로 출력하라:
 
@@ -267,14 +277,16 @@ ${draftSection}${kgSection}
       "description": "상세 설명 (무엇을, 어떻게, 완료 기준)",
       "estimatedMinutes": 20,
       "priority": 2,
-      "dependencies": []
+      "dependencies": [],
+      "fileScope": ["src/moduleA.ts", "src/moduleA.test.ts"]
     },
     {
       "title": "[타입] 다음 작업",
       "description": "상세 설명",
       "estimatedMinutes": 25,
       "priority": 2,
-      "dependencies": ["[타입] 구체적인 작업 제목"]
+      "dependencies": ["[타입] 구체적인 작업 제목"],
+      "fileScope": ["src/moduleB.ts"]
     }
   ],
   "totalEstimatedMinutes": 45

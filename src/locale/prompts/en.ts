@@ -254,6 +254,16 @@ Analyze this task and decompose it into units completable within ${targetMinutes
 - Use clear and specific titles
 - Number in order if there are dependencies
 
+## File Scope (REQUIRED for parallel execution)
+For each sub-task, declare \`fileScope\`: the concrete files/modules it will create or modify
+(relative repo paths, e.g. \`src/foo/bar.ts\`). Workers run concurrently in isolated git
+worktrees, so two sub-tasks that touch the SAME file would conflict on merge:
+- Prefer disjoint \`fileScope\` sets so sub-tasks can run in parallel
+- If two sub-tasks must edit the same file, either merge them into one sub-task or
+  mark one as \`dependencies\` of the other so they run sequentially
+- Base \`fileScope\` on your analysis (likely files / affected modules above); if genuinely
+  unknown, return an empty array — do NOT invent paths
+
 ## Output Format (JSON)
 Output the analysis results in the following JSON format:
 
@@ -267,14 +277,16 @@ Output the analysis results in the following JSON format:
       "description": "Detailed description (what, how, completion criteria)",
       "estimatedMinutes": 20,
       "priority": 2,
-      "dependencies": []
+      "dependencies": [],
+      "fileScope": ["src/moduleA.ts", "src/moduleA.test.ts"]
     },
     {
       "title": "[Type] Next task",
       "description": "Detailed description",
       "estimatedMinutes": 25,
       "priority": 2,
-      "dependencies": ["[Type] Specific task title"]
+      "dependencies": ["[Type] Specific task title"],
+      "fileScope": ["src/moduleB.ts"]
     }
   ],
   "totalEstimatedMinutes": 45

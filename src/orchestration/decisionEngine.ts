@@ -55,6 +55,7 @@ export interface TaskItem {
   createdAt: number;
   dueDate?: number;
   blockedBy?: string[];    // Other task IDs
+  fileScope?: string[];    // Files/modules this task modifies (planner-declared) — for parallel conflict detection
   impactAnalysis?: ImpactAnalysis;  // Knowledge graph impact analysis
   estimatedMinutes?: number;
 }

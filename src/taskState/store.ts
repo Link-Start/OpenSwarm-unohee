@@ -49,6 +49,9 @@ export const OpenSwarmTaskStateSchema = z.object({
   childIssueIds: z.array(z.string()).default([]),
   dependencyIssueIds: z.array(z.string()).default([]),
   dependencyTitles: z.array(z.string()).default([]),
+  // Files/modules this task will touch (declared by the planner). Drives
+  // file-scope overlap detection so non-overlapping tasks run concurrently.
+  fileScope: z.array(z.string()).default([]),
   topoRank: z.number().int().nonnegative().optional(),
   linearState: z.string().optional(),
   execution: ExecutionStateSchema.default({ status: 'backlog', retryCount: 0 }),
@@ -111,6 +114,7 @@ function createDefaultState(issueId: string): OpenSwarmTaskState {
     childIssueIds: [],
     dependencyIssueIds: [],
     dependencyTitles: [],
+    fileScope: [],
     execution: {
       status: 'backlog',
       retryCount: 0,
@@ -138,6 +142,7 @@ export function upsertTaskState(issueId: string, patch: Partial<OpenSwarmTaskSta
     childIssueIds: patch.childIssueIds ?? current.childIssueIds ?? [],
     dependencyIssueIds: patch.dependencyIssueIds ?? current.dependencyIssueIds ?? [],
     dependencyTitles: patch.dependencyTitles ?? current.dependencyTitles ?? [],
+    fileScope: patch.fileScope ?? current.fileScope ?? [],
     execution: {
       ...current.execution,
       ...(patch.execution),
@@ -165,6 +170,7 @@ export function enrichTaskFromState(task: TaskItem): TaskItem {
     blockedBy: task.blockedBy && task.blockedBy.length > 0 ? task.blockedBy : state.dependencyIssueIds,
     topoRank: task.topoRank ?? state.topoRank,
     linearState: task.linearState || state.linearState,
+    fileScope: task.fileScope && task.fileScope.length > 0 ? task.fileScope : state.fileScope,
   };
 }
 

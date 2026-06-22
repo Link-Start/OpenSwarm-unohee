@@ -45,6 +45,38 @@ describe('task state store', () => {
     expect(task.topoRank).toBe(1);
   });
 
+  it('persists and enriches planner-declared file scope', () => {
+    upsertTaskState('ISSUE-SCOPE', {
+      issueIdentifier: 'INT-SCOPE',
+      fileScope: ['src/a.ts', 'src/a.test.ts'],
+      execution: { status: 'todo', retryCount: 0 },
+      updatedAt: new Date().toISOString(),
+    });
+
+    const enriched = enrichTaskFromState({
+      id: 'ISSUE-SCOPE',
+      source: 'linear',
+      title: 'scoped task',
+      priority: 2,
+      createdAt: Date.now(),
+      issueId: 'ISSUE-SCOPE',
+    });
+
+    expect(enriched.fileScope).toEqual(['src/a.ts', 'src/a.test.ts']);
+
+    // An explicit scope already on the task wins over the stored one.
+    const overridden = enrichTaskFromState({
+      id: 'ISSUE-SCOPE',
+      source: 'linear',
+      title: 'scoped task',
+      priority: 2,
+      createdAt: Date.now(),
+      issueId: 'ISSUE-SCOPE',
+      fileScope: ['src/override.ts'],
+    });
+    expect(overridden.fileScope).toEqual(['src/override.ts']);
+  });
+
   it('keeps tasks blocked until dependencies are done, then releases them', () => {
     upsertTaskState('ISSUE-1', {
       execution: { status: 'in_progress', retryCount: 0 },
