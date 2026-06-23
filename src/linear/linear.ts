@@ -29,6 +29,10 @@ async function getProjectInfo(issue: any): Promise<LinearProjectInfo | undefined
 let client: LinearClient | null = null;
 let teamId: string = '';
 let teamIds: string[] = [];
+// OAuth runtime state — when the client was built from a Linear OAuth access
+// token, the token expires (~24h) and must be refreshed + the client rebuilt.
+let isOAuthMode = false;
+let currentToken = '';
 
 /** Build a Linear team filter that works for both single and multiple team IDs */
 function teamFilter() {
@@ -170,12 +174,39 @@ export function getDailyIssueCount(): number {
  * Initialize the Linear client
  * Rate limiting is applied at the function level in this file
  */
-export function initLinear(apiKey: string, team: string): void {
-  client = new LinearClient({ apiKey });
+export function initLinear(credential: string, team: string, isOAuth = false): void {
+  // OAuth access tokens use the Bearer `accessToken` path; personal API keys use
+  // the raw `apiKey` path. (Linear OAuth tokens fail if sent as a raw apiKey.)
+  client = new LinearClient(isOAuth ? { accessToken: credential } : { apiKey: credential });
+  isOAuthMode = isOAuth;
+  currentToken = credential;
   teamId = team;
   teamIds = team.split(',').map(id => id.trim()).filter(Boolean);
   setLinearClient(client);
-  console.log('[Linear] Client initialized');
+  console.log(`[Linear] Client initialized (${isOAuth ? 'OAuth' : 'apiKey'})`);
+}
+
+/**
+ * Keep the Linear OAuth token fresh for a long-running daemon. No-op for API-key
+ * mode. Called before each heartbeat fetch: ensureValidToken refreshes the token
+ * when it's near expiry, and if it changed we rebuild the client (LinearClient
+ * holds the token at construction). Best-effort — failures are logged, not thrown,
+ * so a transient refresh error doesn't crash the heartbeat.
+ */
+export async function ensureLinearAuthFresh(): Promise<void> {
+  if (!isOAuthMode || !client) return;
+  try {
+    const { AuthProfileStore, ensureValidToken } = await import('../auth/index.js');
+    const token = await ensureValidToken(new AuthProfileStore(), 'linear:default');
+    if (token !== currentToken) {
+      client = new LinearClient({ accessToken: token });
+      currentToken = token;
+      setLinearClient(client);
+      console.log('[Linear] OAuth token refreshed — client reinitialized');
+    }
+  } catch (err) { // cxt-ignore: error_swallow,exception_hiding — best-effort; logged, must not crash the heartbeat
+    console.error(`[Linear] OAuth refresh failed: ${(err as Error).message}`);
+  }
 }
 
 /**
@@ -193,6 +224,53 @@ export function getClient(): LinearClient {
     throw new Error('Linear client not initialized. Call initLinear() first.');
   }
   return client;
+}
+
+/** Linear team summary for the `openswarm init` picker. */
+export interface LinearTeamInfo {
+  id: string;
+  key: string;
+  name: string;
+}
+
+/** Credential for one-off Linear calls before initLinear() (init picker). */
+export interface LinearCredential {
+  apiKey?: string;
+  /** OAuth access token (Bearer) — takes precedence over apiKey. */
+  accessToken?: string;
+}
+
+function linearClientFor(cred?: LinearCredential): LinearClient {
+  if (cred?.accessToken) return new LinearClient({ accessToken: cred.accessToken });
+  if (cred?.apiKey) return new LinearClient({ apiKey: cred.apiKey });
+  return getClient();
+}
+
+/**
+ * List all Linear teams the credential can see — for the `openswarm init` picker.
+ * Accepts an explicit credential (apiKey or OAuth accessToken) so init can call
+ * it before initLinear() runs; falls back to the initialized client.
+ */
+export async function listTeams(cred?: LinearCredential): Promise<LinearTeamInfo[]> {
+  const c = linearClientFor(cred);
+  const res: any = await withRateLimit('linear', () => c.teams({ first: 250 })); // cxt-ignore: type_safety — SDK TeamConnection
+  return (res?.nodes ?? []).map((t: any) => ({ id: t.id, key: t.key, name: t.name }));
+}
+
+/**
+ * List projects within a team — for the `openswarm init` picker. Accepts an
+ * explicit credential (apiKey or OAuth accessToken).
+ */
+export async function listProjects(teamId: string, cred?: LinearCredential): Promise<LinearProjectInfo[]> {
+  const c = linearClientFor(cred);
+  const team: any = await withRateLimit('linear', () => c.team(teamId)); // cxt-ignore: type_safety — SDK Team
+  const res: any = await withRateLimit('linear', () => team.projects({ first: 250 }));
+  return (res?.nodes ?? []).map((p: any) => ({
+    id: p.id,
+    name: p.name,
+    icon: p.icon ?? undefined,
+    color: p.color ?? undefined,
+  }));
 }
 
 /**

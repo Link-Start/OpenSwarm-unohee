@@ -9,6 +9,12 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runCli } from './runners/cliRunner.js';
 import { loadConfig, validateConfig, generateSampleConfig } from './core/config.js';
+import { loadEnvFile } from './core/envFile.js';
+
+// Load .env so CLI commands (e.g. `auth login --provider linear` reading
+// LINEAR_OAUTH_CLIENT_ID) see the same env the daemon does. Idempotent; never
+// overrides an already-set shell var.
+loadEnvFile();
 
 // Read version from package.json so it stays in sync with the published package.
 // cli.js lives at <pkg>/dist/cli.js, so package.json is one directory up.
@@ -82,6 +88,16 @@ program
 
     const { runInitWizard } = await import('./cli/initWizard.js');
     await runInitWizard({ force: opts.force });
+  });
+
+// openswarm doctor
+
+program
+  .command('doctor')
+  .description('Diagnose the environment (runtime, native deps, providers, ports, config)')
+  .action(async () => {
+    const { handleDoctor } = await import('./cli/doctorHandler.js');
+    await handleDoctor();
   });
 
 // openswarm validate
@@ -346,8 +362,8 @@ const authCmd = program
 
 authCmd
   .command('login')
-  .description('Login via OAuth/PKCE (gpt, openrouter)')
-  .option('--provider <provider>', 'Provider to authenticate (gpt | openrouter)', 'gpt')
+  .description('Login via OAuth/PKCE (gpt, openrouter, linear)')
+  .option('--provider <provider>', 'Provider to authenticate (gpt | openrouter | linear)', 'gpt')
   .option('--client-id <clientId>', 'GPT only: override OAuth Client ID (defaults to the public Codex client)')
   .option('--api-key <apiKey>', 'OpenRouter only: skip browser flow and store this sk-or-* key directly')
   .option('--port <port>', 'Callback server port', parseInt)
@@ -375,7 +391,7 @@ authCmd
 authCmd
   .command('logout')
   .description('Remove stored auth tokens')
-  .option('--provider <provider>', 'Provider to remove (gpt | openrouter)', 'gpt')
+  .option('--provider <provider>', 'Provider to remove (gpt | openrouter | linear)', 'gpt')
   .action(async (opts: { provider: string }) => {
     const { handleAuthLogout } = await import('./cli/authHandler.js');
     handleAuthLogout(opts.provider);
