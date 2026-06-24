@@ -10,6 +10,7 @@ import type { WorkerContext } from '../locale/types.js';
 import type { AdapterName, ProcessContext } from '../adapters/types.js';
 import { getAdapter, spawnCli } from '../adapters/index.js';
 import { expandPath } from '../core/config.js';
+import { RateLimitError } from '../adapters/rateLimitError.js';
 
 // Types
 
@@ -132,6 +133,9 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
 
     return parsedResult;
   } catch (error) {
+    // Rate limit errors must propagate so the scheduler can pause — not swallow
+    if (error instanceof RateLimitError) throw error;
+
     const errMsg = error instanceof Error ? error.message : String(error);
     console.error(`[Worker] Execution failed: ${errMsg}`);
     // Log stderr hint if available (CLI spawn errors often contain useful info)

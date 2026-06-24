@@ -37,6 +37,7 @@ import * as documenterAgent from './documenter.js';
 import * as auditorAgent from './auditor.js';
 import * as skillDocumenterAgent from './skillDocumenter.js';
 import { StuckDetector, createStuckDetector } from '../support/stuckDetector.js';
+import { RateLimitError } from '../adapters/rateLimitError.js';
 
 // Types
 
@@ -102,7 +103,9 @@ export interface PipelineResult {
   success: boolean;
   sessionId: string;
   stages: StageResult[];
-  finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled' | 'decomposed';
+  finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled' | 'decomposed' | 'rate_limited';
+  /** Unix timestamp (ms) when rate-limit quota resets — set when finalStatus is 'rate_limited' */
+  rateLimitResetsAt?: number;
   totalDuration: number;
   /** Total number of completed iterations */
   iterations: number;
@@ -349,15 +352,22 @@ export class PairPipeline extends EventEmitter {
       const cancelled = error instanceof PipelineCancelledError || !!this.abortSignal?.aborted;
       if (cancelled) {
         console.log(`[${context.taskPrefix}] Pipeline cancelled`);
+      } else if (error instanceof RateLimitError) {
+        console.warn(`[${context.taskPrefix}] Pipeline rate-limited: ${error.message}`);
       } else {
         console.error('[%s] Error:', context.taskPrefix, error);
       }
       agentPair.updateSessionStatus(session.id, 'failed');
+
+      // Rate-limit: surface as its own finalStatus so the runner skips failure
+      // counting and Linear comment spam.
+      const rateLimited = error instanceof RateLimitError;
       return {
         success: false,
         sessionId: session.id,
         stages,
-        finalStatus: cancelled ? 'cancelled' : 'failed',
+        finalStatus: cancelled ? 'cancelled' : rateLimited ? 'rate_limited' : 'failed',
+        rateLimitResetsAt: rateLimited && error.resetsAt ? error.resetsAt * 1000 : undefined,
         totalDuration: Date.now() - startTime,
         iterations: context.currentIteration,
         workerResult: context.workerResult,
