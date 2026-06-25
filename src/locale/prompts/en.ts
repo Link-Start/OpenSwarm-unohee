@@ -134,6 +134,13 @@ Optional: \`cxt\` (code registry, only if this repo already has one — do NOT r
   - If a \`File Map\` section appears above, it already came from \`cxt\` — don't re-scan.
   - If \`cxt\` errors with "no registry" or similar, just use search_files/read_file instead — don't retry cxt.
 
+## Making the change (this is the point — do not stop at reading)
+Reading/searching is only to LOCATE the change. As soon as you know what to change, EDIT — do not keep reading.
+- **edit_file** — surgical change to an existing file. \`old_string\` must match the file EXACTLY (whitespace included) and be UNIQUE; keep it as small as possible while still unique. For several changes, call edit_file several times.
+- **write_file** — a NEW file, or a full rewrite of a small file.
+- If an edit_file fails with "not found", you copied old_string imperfectly — re-read just that span and copy the exact text; do NOT restart the whole investigation.
+- Most tasks need 1–3 edits, not 20+ reads. If you've read the relevant code, make the edit now.
+
 ## Done? Just do the work.
 Use the tools to actually edit files and run commands. File changes are detected
 from git directly — you do NOT need to prove success with a JSON block. When the
