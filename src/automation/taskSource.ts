@@ -54,6 +54,10 @@ export interface ITaskSource {
   logPairStart(issueId: string, sessionId: string, projectPath: string): Promise<void>;
   logPairComplete(issueId: string, sessionId: string, stats: PairCompleteStats): Promise<void>;
   logBlocked(issueId: string, sessionName: string, reason: string): Promise<void>;
+  /** Permanently park an issue the loop has given up on so it is not retried automatically. */
+  logStuck(issueId: string, sessionName: string, reason: string): Promise<void>;
+  /** Clear the stuck marker so the issue becomes eligible for retry again. */
+  unstick(issueId: string): Promise<void>;
   logHalt(issueId: string, sessionId: string, confidence: number, iteration: number, reason: string): Promise<void>;
   markAsDecomposed(issueId: string, subIssueCount: number, totalMinutes: number): Promise<void>;
 }
@@ -79,6 +83,8 @@ export class LinearTaskSource implements ITaskSource {
   logPairStart(issueId: string, sessionId: string, projectPath: string): Promise<void> { return linear.logPairStart(issueId, sessionId, projectPath); }
   logPairComplete(issueId: string, sessionId: string, stats: PairCompleteStats): Promise<void> { return linear.logPairComplete(issueId, sessionId, stats); }
   logBlocked(issueId: string, sessionName: string, reason: string): Promise<void> { return linear.logBlocked(issueId, sessionName, reason); }
+  logStuck(issueId: string, sessionName: string, reason: string): Promise<void> { return linear.logStuck(issueId, sessionName, reason); }
+  unstick(issueId: string): Promise<void> { return linear.removeIssueLabel(issueId, linear.STUCK_LABEL); }
   logHalt(issueId: string, sessionId: string, confidence: number, iteration: number, reason: string): Promise<void> { return linear.logHalt(issueId, sessionId, confidence, iteration, reason); }
   markAsDecomposed(issueId: string, subIssueCount: number, totalMinutes: number): Promise<void> { return linear.markAsDecomposed(issueId, subIssueCount, totalMinutes); }
 }
@@ -160,6 +166,13 @@ export class SqliteTaskSource implements ITaskSource {
   }
   async logBlocked(issueId: string, _sessionName: string, reason: string): Promise<void> {
     await this.addComment(issueId, `🚧 [Automation] Blocked: ${reason}`);
+  }
+  async logStuck(issueId: string, _sessionName: string, reason: string): Promise<void> {
+    await this.addComment(issueId, `🛑 [Automation] Stuck — retries exhausted: ${reason}`);
+    await this.updateState(issueId, 'Backlog');
+  }
+  async unstick(_issueId: string): Promise<void> {
+    // Local store has no label concept; recovery is via moving the issue back to an active state.
   }
   async logHalt(issueId: string, _sessionId: string, confidence: number, iteration: number, reason: string): Promise<void> {
     await this.addComment(issueId, `⚠️ [Automation] HALT (confidence ${confidence}%, attempt #${iteration}): ${reason}`);

@@ -26,6 +26,7 @@ import {
   DecisionResult,
   TaskItem,
   getDecisionEngine,
+  classifyStuck,
 } from '../orchestration/decisionEngine.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
@@ -44,6 +45,7 @@ import { t } from '../locale/index.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { pruneWorktrees } from '../support/worktreeManager.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
+import { STUCK_LABEL } from '../linear/index.js';
 import { refreshGraph, toProjectSlug } from '../knowledge/index.js';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
 import { detectFileConflicts } from '../orchestration/conflictDetector.js';
@@ -283,13 +285,11 @@ export class AutonomousRunner {
 
           try {
             await execution.syncFailureState(task, `Max rejection limit reached (${rejectionCount} attempts): ${feedback}`);
-            await getTaskSource()?.logBlocked(task.issueId, 'autonomous-runner',
-              `⚠️ **Max rejection limit reached (${rejectionCount} attempts)**\n\n` +
-              `This task has been rejected ${rejectionCount} times by the reviewer and requires manual intervention.\n\n` +
-              `**Latest rejection reason:**\n${feedback}\n\n` +
-              `**Action required:** Please review the task requirements and code manually, or adjust the task scope.`
+            await getTaskSource()?.logStuck(task.issueId, 'autonomous-runner',
+              `Rejected ${rejectionCount} times by the reviewer — automatic retries exhausted.\n\n` +
+              `**Latest rejection reason:**\n${feedback}`
             );
-            console.log(`[Scheduler] Issue ${task.issueId} permanently blocked (max rejections reached)`);
+            console.log(`[Scheduler] Issue ${task.issueId} marked STUCK (max rejections reached)`);
           } catch (err) {
             console.error(`[Scheduler] Failed to update issue state:`, err);
           }
@@ -324,13 +324,19 @@ export class AutonomousRunner {
           this.completedTaskIds.add(task.issueId); // Prevent re-selection
           clearRetryTime(task.issueId, this.failedTaskRetryTimes); // Clear retry time
           this.saveTaskState();
-          console.log(`[Scheduler] Task failure count: ${count}/${AutonomousRunner.MAX_RETRY_COUNT} for ${taskCtx} — BLOCKED`);
+          console.log(`[Scheduler] Task failure count: ${count}/${AutonomousRunner.MAX_RETRY_COUNT} for ${taskCtx} — STUCK`);
+          // Surface the underlying failure (worker CLI error / review feedback) so the
+          // stuck comment is actionable instead of an opaque "failed N times".
+          const failureDetail = result.workerResult?.error
+            || result.reviewResult?.feedback
+            || 'No error detail captured (worker produced no output).';
           try {
-            await execution.syncFailureState(task, `Autonomous execution failed ${count} times`);
-            await getTaskSource()?.logBlocked(task.issueId, 'autonomous-runner',
-              `Autonomous execution failed ${count} times. Moving to Blocked for manual review.`
+            await execution.syncFailureState(task, `Autonomous execution failed ${count} times: ${failureDetail}`);
+            await getTaskSource()?.logStuck(task.issueId, 'autonomous-runner',
+              `Autonomous execution failed ${count} times in a row — automatic retries exhausted.\n\n` +
+              `**Last failure:**\n${failureDetail}`
             );
-            console.log(`[Scheduler] Issue ${task.issueId} marked as Todo (blocked) (max retries exceeded)`);
+            console.log(`[Scheduler] Issue ${task.issueId} marked STUCK (max retries exceeded)`);
           } catch (err) {
             console.error(`[Scheduler] Failed to update issue state:`, err);
           }
@@ -372,11 +378,13 @@ export class AutonomousRunner {
 
   private filterAlreadyProcessed(tasks: TaskItem[]): TaskItem[] {
     let recovered = 0;
+    let stuckSkipped = 0;
     let backoffSkipped = 0;
     let noProject = 0;
-    const recoverableStates = new Set(['Todo', 'In Progress', 'In Review']);
+    const toUnstick: string[] = [];
     const filtered = tasks.filter(task => {
       const id = task.issueId || task.id;
+      const isStuck = task.labels?.includes(STUCK_LABEL) ?? false;
 
       // No Linear project → can't be routed to a repo. Drop here (quietly, once per
       // heartbeat) instead of letting a whole batch of project-less Todos reach the
@@ -391,15 +399,28 @@ export class AutonomousRunner {
         return false; // Skip tasks that hit max rejection limit
       }
 
-      // Recover issues in active states from completed/failed list
-      // (user or system intentionally moved back to active, so retry)
-      if (recoverableStates.has(task.linearState || '') && (this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT)) {
+      // Stuck handling (INT-1908): a permanently-blocked issue is parked in Backlog
+      // with the `swarm:stuck` label and must NOT be retried automatically. The
+      // recovery branch only fires when the user pulls the issue back to an active
+      // state — the previous code re-selected it every heartbeat because blocking
+      // left it in Todo (a recoverable state), which the recovery branch then
+      // mistook for deliberate user intervention.
+      const hasFailureHistory = this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT;
+      const stuckDecision = classifyStuck({ isStuck, linearState: task.linearState, hasFailureHistory });
+      if (stuckDecision === 'recover') {
         this.completedTaskIds.delete(id);
         this.failedTaskCounts.delete(id);
         clearRejection(id); // Clear rejection count on recovery
         clearRetryTime(id, this.failedTaskRetryTimes); // Clear retry backoff time
+        if (isStuck) toUnstick.push(id); // strip the stuck label so it is not re-skipped
         recovered++;
         return true;
+      }
+      if (stuckDecision === 'skip-stuck') {
+        // Durable across restarts: the label lives on the Linear issue, not in the
+        // in-memory counters that a restart would lose.
+        stuckSkipped++;
+        return false;
       }
 
       if (this.completedTaskIds.has(id)) return false;
@@ -413,6 +434,15 @@ export class AutonomousRunner {
 
       return true;
     });
+    // Strip the stuck label from issues the user pulled back (fire-and-forget — a
+    // failed unstick just means the next heartbeat tries again).
+    for (const id of toUnstick) {
+      getTaskSource()?.unstick(id).catch(err =>
+        console.warn(`[AutonomousRunner] Failed to clear stuck label for ${id}:`, err));
+    }
+    if (stuckSkipped > 0) {
+      this.syslog(`🛑 Skipped ${stuckSkipped} stuck issue(s) (retries exhausted — remove the \`${STUCK_LABEL}\` label or move to Todo to retry)`);
+    }
     if (recovered > 0) {
       this.saveTaskState();
       this.syslog(`♻ Recovered ${recovered} Todo issues from completed/failed/rejected list`);

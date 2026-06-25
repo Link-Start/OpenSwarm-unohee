@@ -576,7 +576,7 @@ export async function getMyIssues(
           description: issue.description ?? undefined,
           state,
           priority: issue.priority,
-          labels: [],
+          labels: issue.labels?.nodes?.map((l) => l.name) ?? [],
           comments: [],
           project: p ? { id: p.id, name: p.name, icon: p.icon ?? undefined, color: p.color ?? undefined } : undefined,
         } as LinearIssueInfo);
@@ -837,6 +837,99 @@ export async function logBlocked(
   }));
   // Use 'Todo' instead of 'Blocked' (Blocked state may not exist in team workflow)
   await updateIssueState(issueId, 'Todo');
+}
+
+/**
+ * Label applied to issues the autonomous loop has given up on after exhausting
+ * its retries. The heartbeat filter excludes issues carrying this label so they
+ * are never retried automatically — the user removes it (or moves the issue back
+ * to an active state) to request a retry.
+ */
+export const STUCK_LABEL = 'swarm:stuck';
+
+/** Resolve a team label id by name, creating the label if it does not exist. */
+async function ensureTeamLabel(
+  linear: LinearClient,
+  resolvedTeamId: string,
+  name: string,
+): Promise<string | undefined> {
+  const team = await linear.team(resolvedTeamId);
+  const labels = await team.labels();
+  const existing = labels.nodes.find((l) => l.name === name);
+  if (existing) return existing.id;
+  try {
+    const created = await linear.createIssueLabel({ teamId: resolvedTeamId, name, color: '#d4504f' });
+    const label = await created.issueLabel;
+    return label?.id;
+  } catch (err) {
+    console.error(`[Linear] Failed to create label "${name}":`, err);
+    return undefined;
+  }
+}
+
+/** Add a label (by name) to an issue without removing its existing labels. */
+export async function addIssueLabel(issueId: string, labelName: string): Promise<void> {
+  if (!isLinearInitialized()) return;
+  const linear = getClient();
+  try {
+    const issue = await linear.issue(issueId);
+    const issueTeam = await issue.team;
+    const resolvedTeamId = issueTeam?.id ?? teamIds[0] ?? teamId;
+    const labelId = await ensureTeamLabel(linear, resolvedTeamId, labelName);
+    if (!labelId) return;
+    const current = await issue.labels();
+    const ids = new Set(current.nodes.map((l) => l.id));
+    if (ids.has(labelId)) return; // already labelled
+    ids.add(labelId);
+    await linear.updateIssue(issueId, { labelIds: Array.from(ids) });
+    clearLinearCache();
+  } catch (err) {
+    console.error(`[Linear] Failed to add label "${labelName}" to ${issueId}:`, err);
+  }
+}
+
+/** Remove a label (by name) from an issue if present. */
+export async function removeIssueLabel(issueId: string, labelName: string): Promise<void> {
+  if (!isLinearInitialized()) return;
+  const linear = getClient();
+  try {
+    const issue = await linear.issue(issueId);
+    const current = await issue.labels();
+    const remaining = current.nodes.filter((l) => l.name !== labelName).map((l) => l.id);
+    if (remaining.length === current.nodes.length) return; // label not present
+    await linear.updateIssue(issueId, { labelIds: remaining });
+    clearLinearCache();
+  } catch (err) {
+    console.error(`[Linear] Failed to remove label "${labelName}" from ${issueId}:`, err);
+  }
+}
+
+/**
+ * Mark an issue as permanently stuck: automatic retries are exhausted, so the
+ * heartbeat must NOT re-attempt it. Adds the durable {@link STUCK_LABEL} (survives
+ * daemon restarts, unlike the in-memory failure counters) and parks the issue in
+ * Backlog — a non-recoverable state, so the heartbeat's recovery branch won't
+ * silently un-block it. Removing the label or moving the issue back to an active
+ * state (Todo / In Progress) is the explicit signal to retry.
+ */
+export async function logStuck(
+  issueId: string,
+  sessionName: string,
+  reason: string,
+): Promise<void> {
+  await addComment(issueId, formatAutomationComment({
+    heading: 'Stuck — automatic retries exhausted',
+    sections: [
+      { label: 'Reason', body: reason },
+      { label: 'How to retry', body: [
+        `Remove the \`${STUCK_LABEL}\` label, or move this issue back to Todo / In Progress.`,
+        'The agent will not retry on its own until then.',
+      ] },
+    ],
+    meta: { Agent: sessionName },
+  }));
+  await addIssueLabel(issueId, STUCK_LABEL);
+  await updateIssueState(issueId, 'Backlog');
 }
 
 // Pair Mode Linear Integration
@@ -1294,7 +1387,7 @@ export async function getStuckIssues(): Promise<{
     filter: {
       team: teamFilter(),
       state: { name: { nin: ['Done', 'Canceled'] } },
-      labels: { name: { in: ['retry', 'failed', 'blocked', 'needs-help'] } },
+      labels: { name: { in: ['retry', 'failed', 'blocked', 'needs-help', STUCK_LABEL] } },
     },
     first: 100,
   }));

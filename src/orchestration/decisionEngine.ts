@@ -49,6 +49,7 @@ export interface TaskItem {
   issueId?: string;        // Linear issue ID
   issueIdentifier?: string; // Linear issue identifier (e.g., LIN-123)
   linearState?: string;    // Linear issue state (e.g., 'Todo', 'Backlog', 'In Progress')
+  labels?: string[];       // Linear label names (e.g., 'swarm:stuck') — used to gate re-selection
   parentId?: string;       // Parent issue ID (for decomposed sub-tasks)
   topoRank?: number;       // Planner topological rank within a decomposed tree
   workflowId?: string;     // Mapped workflow
@@ -111,6 +112,34 @@ export function computeDownstreamCounts(tasks: TaskItem[]): Map<string, number> 
   const counts = new Map<string, number>();
   for (const t of tasks) counts.set(idOf(t), descendants(idOf(t), new Set()).size);
   return counts;
+}
+
+/** Linear states from which the heartbeat will (re)select an issue for work. */
+const RECOVERABLE_STATES = new Set(['Todo', 'In Progress', 'In Review']);
+
+export type StuckDecision = 'recover' | 'skip-stuck' | 'pass';
+
+/**
+ * Decide how the heartbeat filter should treat a task with respect to the stuck
+ * marker (INT-1908). Pure — the caller applies the side effects (clearing failure
+ * counters, stripping the stuck label).
+ *
+ * - `recover`: the issue sits in an active state AND carries the stuck label or a
+ *   failure history → the user deliberately pulled it back, so retry it.
+ * - `skip-stuck`: the issue carries the stuck label but is parked (e.g. Backlog) →
+ *   retries are exhausted, skip it. This is durable across restarts because the
+ *   label lives on the Linear issue, not in the in-memory failure counters.
+ * - `pass`: not stuck — fall through to the normal completed/failed/backoff checks.
+ */
+export function classifyStuck(opts: {
+  isStuck: boolean;
+  linearState?: string;
+  hasFailureHistory: boolean;
+}): StuckDecision {
+  const recoverable = RECOVERABLE_STATES.has(opts.linearState || '');
+  if (recoverable && (opts.isStuck || opts.hasFailureHistory)) return 'recover';
+  if (opts.isStuck) return 'skip-stuck';
+  return 'pass';
 }
 
 /**
@@ -794,6 +823,7 @@ export function linearIssueToTask(issue: {
   priority: number;
   dueDate?: string;
   state?: string;
+  labels?: string[];
   project?: { id: string; name: string };
   parentId?: string;
   blockedBy?: string[];
@@ -808,6 +838,7 @@ export function linearIssueToTask(issue: {
     issueId: issue.id,
     issueIdentifier: issue.identifier,
     linearState: issue.state,
+    labels: issue.labels,
     parentId: issue.parentId,
     blockedBy: issue.blockedBy,
     topoRank: issue.topoRank,
