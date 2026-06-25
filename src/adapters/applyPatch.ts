@@ -111,6 +111,33 @@ export async function applyV4APatch(
   const changed: string[] = [];
   const errors: string[] = [];
 
+  // Snapshot every path the patch touches BEFORE applying, so a mid-patch failure
+  // rolls the tree back to clean. A partial apply (op 1 ok, op 2 fails) used to
+  // leave files modified while the tool reported is_error (editToolCount stays 0),
+  // so the model's retry double-applied the same patch onto already-changed files
+  // → "context not found". Atomic apply makes is_error mean "nothing changed". (INT-1926)
+  const touched = new Set<string>();
+  for (const op of ops) {
+    touched.add(resolvePath(op.filePath));
+    if (op.moveTo) touched.add(resolvePath(op.moveTo));
+  }
+  const snapshots = new Map<string, string | null>(); // abs -> prior content, or null if absent
+  for (const abs of touched) {
+    snapshots.set(abs, await fs.readFile(abs, 'utf-8').catch(() => null));
+  }
+  const rollback = async () => {
+    for (const [abs, content] of snapshots) {
+      try {
+        if (content === null) {
+          await fs.rm(abs).catch(() => {});
+        } else {
+          await fs.mkdir(path.dirname(abs), { recursive: true });
+          await fs.writeFile(abs, content, 'utf-8');
+        }
+      } catch { /* best-effort restore */ }
+    }
+  };
+
   for (const op of ops) {
     try {
       const abs = resolvePath(op.filePath);
@@ -143,7 +170,10 @@ export async function applyV4APatch(
       await fs.writeFile(target, lines.join('\n'), 'utf-8');
       changed.push(op.moveTo ?? op.filePath);
     } catch (err) {
+      // Roll back every already-applied op so the tree is clean for a retry.
       errors.push(`${op.filePath}: ${err instanceof Error ? err.message : String(err)}`);
+      await rollback();
+      return { changed: [], errors };
     }
   }
   return { changed, errors };

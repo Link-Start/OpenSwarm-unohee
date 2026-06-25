@@ -67,7 +67,7 @@ function getWorkerFallbackAdapters(primary: AdapterName): AdapterName[] {
   return fallback && fallback !== primary ? [primary, fallback] : [primary];
 }
 
-function isProviderQuotaError(message?: string): boolean {
+export function isProviderQuotaError(message?: string): boolean {
   if (!message) return false;
   const text = message.toLowerCase();
 
@@ -78,7 +78,11 @@ function isProviderQuotaError(message?: string): boolean {
   const hasUsageLimit = /\busage\b.*\blimit\b/.test(text) || /\blimit\b.*\busage\b/.test(text);
   const hasExceededPair = /\bexceeded\b/.test(text) && /\b(quota|limit|usage)\b/.test(text);
   const has429 = /\b429\b/.test(text) && (/\brequest\b/.test(text) || /rate/.test(text));
-  const hasBilling = /\bbilling\b/.test(text);
+  // "billing" alone is NOT a quota signal — a task whose title/summary mentions
+  // billing/invoices/payments (e.g. a payment-feature issue) would otherwise be
+  // misread as a quota failure and trigger a spurious adapter fallback. Only treat
+  // billing as a quota signal when paired with an actual quota/limit word. (INT-1927)
+  const hasBilling = /\bbilling\b/.test(text) && /\b(quota|limit|exceeded|insufficient|suspended)\b/.test(text);
 
   return (
     hasQuotaSignal ||

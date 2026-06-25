@@ -103,6 +103,39 @@ describe('applyV4APatch', () => {
     expect(res.changed).toEqual([]);
     expect(res.errors[0]).toMatch(/context not found/);
   });
+
+  it('rolls back an already-applied op when a later op fails — atomic (INT-1926)', async () => {
+    await fs.writeFile(resolve('a.txt'), 'A1', 'utf-8');
+    await fs.writeFile(resolve('b.txt'), 'B1', 'utf-8');
+    const res = await applyV4APatch(
+      wrap(
+        '*** Update File: a.txt\n@@\n-A1\n+A2\n' +      // valid — applied first
+        '*** Update File: b.txt\n@@\n-NOPE\n+B2',        // context not found — fails
+      ),
+      dir, resolve,
+    );
+    expect(res.errors).toHaveLength(1);
+    expect(res.errors[0]).toMatch(/context not found/);
+    // Nothing is reported as applied AND the first op is rolled back, so a retry
+    // re-applies cleanly instead of double-patching an already-modified file.
+    expect(res.changed).toEqual([]);
+    expect(await fs.readFile(resolve('a.txt'), 'utf-8')).toBe('A1');
+    expect(await fs.readFile(resolve('b.txt'), 'utf-8')).toBe('B1');
+  });
+
+  it('removes a created file when a later op fails — atomic (INT-1926)', async () => {
+    await fs.writeFile(resolve('exists.txt'), 'X', 'utf-8');
+    const res = await applyV4APatch(
+      wrap(
+        '*** Add File: created.txt\n+new content\n' +    // applied first
+        '*** Update File: exists.txt\n@@\n-NOPE\n+Y',     // fails
+      ),
+      dir, resolve,
+    );
+    expect(res.changed).toEqual([]);
+    await expect(fs.access(resolve('created.txt'))).rejects.toThrow(); // rolled back
+    expect(await fs.readFile(resolve('exists.txt'), 'utf-8')).toBe('X');
+  });
 });
 
 describe('executeTool: apply_patch dispatch', () => {
@@ -130,5 +163,17 @@ describe('executeTool: apply_patch dispatch', () => {
     );
     expect(r.is_error).toBe(true);
     expect(r.content).toMatch(/PROTECTED/);
+  });
+
+  it('refuses a patch that renames INTO a protected path via Move to (INT-1928)', async () => {
+    await fs.writeFile(resolve('src.ts'), 'x', 'utf-8');
+    const r = await executeTool(
+      call(wrap('*** Update File: src.ts\n*** Move to: guard.test.ts\n@@\n-x\n+y')),
+      dir, undefined, { protectedFiles: [resolve('guard.test.ts')] },
+    );
+    expect(r.is_error).toBe(true);
+    expect(r.content).toMatch(/PROTECTED/);
+    // Rejected before applying — the source file is untouched.
+    expect(await fs.readFile(resolve('src.ts'), 'utf-8')).toBe('x');
   });
 });

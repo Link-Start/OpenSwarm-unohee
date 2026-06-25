@@ -6,9 +6,24 @@
 // behaviour: keep recent blocks intact, never leave orphan tool messages.
 // ============================================
 
-import { describe, it, expect } from 'vitest';
-import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, type ChatMessage } from './agenticLoop.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, runAgenticLoop, type ChatMessage } from './agenticLoop.js';
 import type { ToolCall } from './tools.js';
+
+/** Scripted API response carrying a single tool call. */
+const toolCallResp = (id: string, name: string, args: object) => ({
+  choices: [{
+    message: { role: 'assistant', content: null, tool_calls: [{ id, type: 'function' as const, function: { name, arguments: JSON.stringify(args) } }] },
+    finish_reason: 'tool_calls',
+  }],
+});
+/** Scripted API response with no tool calls (model tries to finish). */
+const finalResp = (content: string) => ({
+  choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }],
+});
 
 describe('progress-based stop helpers', () => {
   const mk = (name: string, args: string): ToolCall => ({ id: 'x', function: { name, arguments: args } });
@@ -148,5 +163,71 @@ describe('shouldNudgeReadLoop — early read-loop nudge (ported 8a1420f)', () =>
   });
   it('stops nudging once the budget is exhausted', () => {
     expect(shouldNudgeReadLoop(0, 3, 3, READ_LOOP_NUDGE_AT + 5)).toBe(false);
+  });
+});
+
+describe('runAgenticLoop nudge budgets (INT-1925)', () => {
+  it('read-loop nudges do not drain the no-edit guard budget', async () => {
+    const logs: string[] = [];
+    let call = 0;
+    // Read a different (nonexistent) file each turn so the no-progress stall
+    // detector never fires; zero edits throughout. After the read-loop nudge
+    // fires (turn >= READ_LOOP_NUDGE_AT), the model tries to finish with no edits.
+    const callApi = async () => {
+      call++;
+      if (call <= READ_LOOP_NUDGE_AT + 1) {
+        return toolCallResp(`c${call}`, 'read_file', { path: `nope${call}.ts` });
+      }
+      return finalResp('analysis only');
+    };
+    await runAgenticLoop({
+      prompt: 'fix the bug', cwd: process.cwd(), model: 'test', callApi,
+      nudgeMaxOnNoEdit: 1, maxTurns: 30, webTools: false,
+      onLog: (l) => logs.push(l),
+    });
+    // The read-loop nudge fired AND, with a separate counter, the finish-turn
+    // no-edit guard STILL had budget to fire afterwards. (Shared-counter bug
+    // would have left the guard exhausted → no "No-edit guard" log.)
+    expect(logs.some((l) => l.includes('Read-loop nudge'))).toBe(true);
+    expect(logs.some((l) => l.includes('No-edit guard'))).toBe(true);
+  });
+});
+
+describe('runAgenticLoop read cache vs compaction (INT-1929)', () => {
+  let tmp: string;
+  beforeEach(async () => { tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aloop-')); });
+  afterEach(async () => { await fs.rm(tmp, { recursive: true, force: true }); });
+
+  /** Drive two identical reads of f.txt, capturing the tool result the model sees each call. */
+  const runTwoReads = async (opts: { compactAfterMessages: number; compactTokenThreshold?: number; keepRecentMessages?: number }) => {
+    await fs.writeFile(path.join(tmp, 'f.txt'), 'ALPHA_CONTENT', 'utf-8');
+    const seen: string[] = [];
+    let call = 0;
+    const callApi = async (messages: ChatMessage[]) => {
+      const lastTool = [...messages].reverse().find((m) => m.role === 'tool');
+      if (lastTool && lastTool.role === 'tool') seen.push(lastTool.content);
+      call++;
+      if (call <= 2) return toolCallResp(`c${call}`, 'read_file', { path: 'f.txt' });
+      return finalResp('done');
+    };
+    await runAgenticLoop({
+      prompt: 'inspect f', cwd: tmp, model: 'test', callApi,
+      webTools: false, maxTurns: 10, ...opts,
+    });
+    return seen;
+  };
+
+  it('returns a STUB on an in-loop re-read when no compaction happens', async () => {
+    const seen = await runTwoReads({ compactAfterMessages: 999 });
+    expect(seen.some((c) => c.includes('ALPHA_CONTENT'))).toBe(true);
+    expect(seen.some((c) => c.includes('already read'))).toBe(true);
+  });
+
+  it('clears the read cache on compaction so a re-read returns full content again (INT-1929)', async () => {
+    // Force the compaction branch every eligible turn (low thresholds), but keep
+    // recent messages verbatim so the assertion sees the real re-read result.
+    const seen = await runTwoReads({ compactAfterMessages: 2, compactTokenThreshold: 1, keepRecentMessages: 999 });
+    expect(seen.filter((c) => c.includes('ALPHA_CONTENT')).length).toBeGreaterThanOrEqual(2);
+    expect(seen.some((c) => c.includes('already read'))).toBe(false);
   });
 });

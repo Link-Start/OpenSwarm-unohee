@@ -390,9 +390,14 @@ export async function executeTool(
         if (!/\*\*\* Begin Patch/.test(patchText)) {
           return { tool_call_id: callId, content: 'apply_patch: "input" must be a V4A patch starting with "*** Begin Patch".', is_error: true };
         }
+        // Scan BOTH the source headers and `*** Move to:` targets — a rename can
+        // overwrite a protected harness path that no Update/Add/Delete header names. (INT-1928)
         const protectedHit = patchText
           .split('\n')
-          .map((l) => l.match(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/)?.[1]?.trim())
+          .map((l) =>
+            l.match(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/)?.[1]?.trim()
+            ?? l.match(/^\*\*\* Move to: (.+)$/)?.[1]?.trim(),
+          )
           .filter((p): p is string => !!p)
           .find((p) => isProtected(validatePath(p, cwd), execOptions?.protectedFiles));
         if (protectedHit) {

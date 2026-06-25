@@ -215,7 +215,12 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   const seenToolCalls = new Set<string>();
   let noProgressTurns = 0;
   const NO_PROGRESS_LIMIT = 3;
-  let nudgesUsed = 0;
+  // Two independent nudge budgets — they fire for different reasons and must NOT
+  // share a counter. read-loop nudges (mid-loop, "stop reading and edit") used to
+  // drain the same budget as the finish-turn no-edit guard, so a read-heavy run
+  // could exhaust it and then slip past the guard, ending analysis-only. (INT-1925)
+  let noEditNudgesUsed = 0;
+  let readLoopNudgesUsed = 0;
   let apiCallCount = 0;
   let totalTokens = 0;
   let cachedTokens = 0;
@@ -245,6 +250,12 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       if (msgTokens > compactTokenThreshold) {
         onLog?.(`📦 Compacting history (${messages.length} msgs, ${msgTokens} tokens > ${compactTokenThreshold})`);
         compactPriorTurns(messages, keepRecentMessages);
+        // Compaction drops prior read content from the model's view, so the read
+        // cache's premise ("content is already earlier in the conversation") no
+        // longer holds — a stub re-read would leave the model without the file
+        // contents it needs for edit_file's old_string. Clear it so the next
+        // read returns full content again. (INT-1929)
+        readCache.store.clear();
       }
     }
 
@@ -286,9 +297,9 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
       // no-edit 종료 가드 — 수정 필수 작업인데 edit/write를 한 번도 안 하고 끝내려 하면
       // 되밀어 계속하게 한다(경량 모델의 조기 결론 패턴 차단).
-      if (editToolCount === 0 && nudgesUsed < nudgeMaxOnNoEdit) {
-        nudgesUsed++;
-        onLog?.(`↩ No-edit guard: model tried to finish without editing (nudge ${nudgesUsed}/${nudgeMaxOnNoEdit})`);
+      if (editToolCount === 0 && noEditNudgesUsed < nudgeMaxOnNoEdit) {
+        noEditNudgesUsed++;
+        onLog?.(`↩ No-edit guard: model tried to finish without editing (nudge ${noEditNudgesUsed}/${nudgeMaxOnNoEdit})`);
         messages.push({ role: 'assistant', content: assistantMsg.content ?? '' });
         messages.push({
           role: 'user',
@@ -369,9 +380,9 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     // model can burn its whole budget reading/searching and never edit — the
     // finish-turn no-edit guard above never engages because it never tries to finish.
     // Fire DURING the loop at a fixed early turn so the model still has budget to edit.
-    if (shouldNudgeReadLoop(editToolCount, nudgesUsed, nudgeMaxOnNoEdit, turn)) {
-      nudgesUsed++;
-      onLog?.(`↩ Read-loop nudge: turn ${turn}, no edits yet (nudge ${nudgesUsed}/${nudgeMaxOnNoEdit})`);
+    if (shouldNudgeReadLoop(editToolCount, readLoopNudgesUsed, nudgeMaxOnNoEdit, turn)) {
+      readLoopNudgesUsed++;
+      onLog?.(`↩ Read-loop nudge: turn ${turn}, no edits yet (nudge ${readLoopNudgesUsed}/${nudgeMaxOnNoEdit})`);
       messages.push({
         role: 'user',
         content:
