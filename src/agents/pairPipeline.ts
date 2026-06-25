@@ -82,6 +82,8 @@ export interface PipelineConfig {
     relevantFiles: string[];
     suggestedApproach: string;
     projectStats?: string;
+    completionCriteria?: string[];
+    sufficient?: boolean;
     impactAnalysis?: import('../knowledge/types.js').ImpactAnalysis;
     registrySnapshot?: Array<{ filePath: string; summary: string; highlights: string[] }>;
   };
@@ -395,6 +397,8 @@ export class PairPipeline extends EventEmitter {
           relevantFiles: draft.relevantFiles,
           suggestedApproach: draft.suggestedApproach,
           projectStats: draft.projectStats,
+          completionCriteria: draft.completionCriteria,
+          sufficient: draft.sufficient,
         };
 
         if (draft.impactAnalysis) {
@@ -607,15 +611,13 @@ export class PairPipeline extends EventEmitter {
           }
 
           // Pre-check disabled - Haiku format compliance issues causing false rejections
-          // Proceed directly to full Sonnet review for reliability
-          // Reduce review depth when worker confidence is very high
-          let reviewerMaxTurns = this.config.roles?.reviewer?.maxTurns;
-          if (context.workerResult?.confidencePercent && context.workerResult.confidencePercent > 90) {
-            const cappedTurns = Math.min(reviewerMaxTurns ?? 10, 5);
-            console.log(`[${prefix}] High worker confidence (${context.workerResult.confidencePercent}%), limiting reviewer to ${cappedTurns} turns`);
-            reviewerMaxTurns = cappedTurns;
-          }
-          console.log(`[${prefix}] Running full review (Sonnet)...`);
+          // Proceed directly to full review for reliability.
+          // NOTE: the old "high worker confidence → fewer reviewer turns" shortcut was
+          // removed (INT-1914): worker confidence is self-reported, so a confidently
+          // scaffolded task was getting LESS review — exactly the wrong incentive. The
+          // completion-criteria hard gate is the real check now.
+          const reviewerMaxTurns = this.config.roles?.reviewer?.maxTurns;
+          console.log(`[${prefix}] Running full review...`);
           result = await reviewerAgent.runReviewer({
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
@@ -625,6 +627,7 @@ export class PairPipeline extends EventEmitter {
             model: this.config.roles?.reviewer?.model,
             maxTurns: reviewerMaxTurns,
             adapterName: this.config.roles?.reviewer?.adapter,
+            completionCriteria: this.config.draftAnalysis?.completionCriteria,
             processContext: { taskId: context.task.id, stage: 'reviewer' },
             signal: this.abortSignal,
           });

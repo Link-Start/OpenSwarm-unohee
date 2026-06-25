@@ -418,6 +418,10 @@ export interface WorkerContext {
     relevantFiles: string[];
     suggestedApproach: string;
     projectStats?: string;
+    /** Execution-grounded definition of done (INT-1914). */
+    completionCriteria?: string[];
+    /** drafter hard gate (INT-1917): false when the brief is incomplete. */
+    sufficient?: boolean;
   };
   /** Repo knowledge accumulated from past tasks (memory/repoKnowledge.recallRepoKnowledge) */
   repoMemories?: Array<{
@@ -439,6 +443,8 @@ export interface PromptTemplates {
     taskTitle: string;
     taskDescription: string;
     workerReport: string;
+    /** Execution-grounded definition of done the reviewer hard-gates on (INT-1914). */
+    completionCriteria?: string[];
   }) => string;
   buildRevisionPromptFromReview: (opts: {
     decision: string;

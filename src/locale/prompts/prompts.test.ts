@@ -292,3 +292,56 @@ describe('buildPlannerPrompt', () => {
     expect(result).toContain('large');
   });
 });
+
+// ── completion-criteria pass gate (INT-1914) ───────────────────
+
+describe('completion-criteria pass gate', () => {
+  const criteria = ['resolve_turn_model invoked from streaming.ts (call site)', 'bench.json produced'];
+
+  for (const [label, prompts, evidenceWord] of [['en', enPrompts, 'evidence'], ['ko', koPrompts, '증거']] as const) {
+    it(`${label}: worker prompt renders Definition of Done with each criterion`, () => {
+      const result = prompts.buildWorkerPrompt({
+        taskTitle: 'T',
+        taskDescription: 'D',
+        context: {
+          draftAnalysis: {
+            taskType: 'feature', intentSummary: 'i', relevantFiles: ['a.ts'],
+            suggestedApproach: 'x', completionCriteria: criteria, sufficient: true,
+          },
+        },
+      });
+      for (const c of criteria) expect(result).toContain(c);
+      expect(result).toContain(evidenceWord);
+    });
+
+    it(`${label}: worker prompt warns when the draft brief is insufficient`, () => {
+      const result = prompts.buildWorkerPrompt({
+        taskTitle: 'T', taskDescription: 'D',
+        context: {
+          draftAnalysis: {
+            taskType: 'feature', intentSummary: 'i', relevantFiles: [],
+            suggestedApproach: 'x', completionCriteria: [], sufficient: false,
+          },
+        },
+      });
+      expect(result).toContain('⚠️');
+    });
+
+    it(`${label}: reviewer prompt hard-gates on the criteria (revise if unverified)`, () => {
+      const result = prompts.buildReviewerPrompt({
+        taskTitle: 'T', taskDescription: 'D', workerReport: 'did stuff',
+        completionCriteria: criteria,
+      });
+      for (const c of criteria) expect(result).toContain(c);
+      expect(result).toContain(evidenceWord);
+      expect(result.toLowerCase()).toContain('revise');
+    });
+
+    it(`${label}: reviewer prompt omits the gate section when no criteria`, () => {
+      const result = prompts.buildReviewerPrompt({
+        taskTitle: 'T', taskDescription: 'D', workerReport: 'r',
+      });
+      expect(result).not.toContain('HARD GATE');
+    });
+  }
+});

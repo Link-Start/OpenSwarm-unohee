@@ -5,23 +5,95 @@
 //          Planner/Worker에 enriched context를 제공하여 첫 시도 정확도 향상
 // ============================================
 
-import { getAdapter, spawnCli } from '../adapters/index.js';
+import { getAdapter, getDefaultAdapterName, spawnCli } from '../adapters/index.js';
 import { analyzeIssue } from '../knowledge/index.js';
 import { getRegistryStore } from '../registry/sqliteStore.js';
 import type { ImpactAnalysis } from '../knowledge/types.js';
+import type { AdapterName } from '../adapters/types.js';
+
+// ============ drafter 모델 / 게이트 정책 ============
+
+/**
+ * Explicit per-provider drafter model (INT-1915). The draft brief gates every
+ * downstream stage, so the drafter must use a capable model — not whatever the
+ * adapter CLI happens to default to (claude -p otherwise leans entirely on CLI
+ * config; OpenRouter otherwise falls back to a generic default). Adapters not
+ * listed fall through to `adapter.getDefaultModel()`. Keep this as the single
+ * point of truth rather than a hard-coded catalog (which would rot on provider
+ * updates) — it is one constant per provider, easy to bump.
+ */
+const DRAFT_MODELS: Partial<Record<AdapterName, string>> = {
+  // Capable but cost-aware model for the brief (INT-1915): the drafter runs on
+  // EVERY task, and claude -p loads the full personal env (~39k tokens/call), so
+  // opus on every brief was too costly. sonnet keeps the brief faithful at a
+  // fraction of the cost; bump back to 'opus' if brief quality regresses.
+  claude: 'sonnet',
+  // Strong file:line-accurate non-frontier model (see planner choice, INT-1607).
+  openrouter: 'qwen/qwen3-235b-a22b-2507',
+};
+
+/** Minimum execution-grounded criteria a sufficient brief must carry. */
+const DRAFT_MIN_CRITERIA = 1;
+/** Max attempts to coax a sufficient draft out of one adapter before falling back. */
+const DRAFT_MAX_ATTEMPTS = 2;
+
+/** Appended on retry when the first brief was too thin (INT-1917 hard gate). */
+const DRAFT_RETRY_NUDGE = `
+
+## ⚠️ Your previous brief was insufficient
+It was missing a concrete intent, real relevant files, or execution-grounded
+completionCriteria. Read the actual code (read_file / search_files) and produce a
+FAITHFUL brief: a specific intent, at least one real file path, and 2–5 completion
+criteria that are verifiable by evidence (call sites, produced artifacts, before/
+after numbers) — never satisfiable by scaffolding alone.`;
+
+/**
+ * drafter hard gate (INT-1917): is the brief faithful enough to hand to a worker?
+ * A lazy draft (no intent, no files, no criteria) must NOT pass silently.
+ */
+export function isDraftSufficient(d: Partial<DraftAnalysis>): boolean {
+  const intent = (d.intentSummary ?? '').trim();
+  const approach = (d.suggestedApproach ?? '').trim();
+  const files = d.relevantFiles ?? [];
+  const criteria = d.completionCriteria ?? [];
+  return (
+    intent.length >= 12 &&
+    approach.length >= 12 &&
+    files.length >= 1 &&
+    criteria.length >= DRAFT_MIN_CRITERIA
+  );
+}
 
 // ============ 타입 ============
 
 /** Draft 분석 결과 — Planner와 Worker 모두에 주입 */
 export interface DraftAnalysis {
-  /** 작업 유형 분류 */
-  taskType: 'bugfix' | 'feature' | 'refactor' | 'docs' | 'test' | 'config' | 'unknown';
+  /**
+   * 작업 유형 분류. Few-shot, not a closed set (INT-1916): the model may return a
+   * more specific label than the common bugfix/feature/refactor/docs/test/config.
+   */
+  taskType: string;
   /** Haiku가 요약한 핵심 의도 (1-2문장) */
   intentSummary: string;
   /** Haiku가 식별한 관련 파일/모듈 목록 */
   relevantFiles: string[];
   /** Haiku가 제안한 접근 방식 (1-3문장) */
   suggestedApproach: string;
+  /**
+   * Execution-grounded definition of done (INT-1914). Each item must be
+   * verifiable with concrete evidence — e.g. "select_model_for_load is called
+   * from streaming.py (call site)", "bench.json artifact is produced", "before/
+   * after turn counts reported" — NOT "function is defined". The worker is held
+   * to these and the reviewer hard-gates on evidence for each.
+   */
+  completionCriteria: string[];
+  /**
+   * drafter hard gate (INT-1917): false when the draft failed to produce a
+   * faithful brief (empty intent / no relevant files / no criteria) even after
+   * retries. Downstream the worker is told the brief is incomplete and must
+   * investigate thoroughly itself.
+   */
+  sufficient: boolean;
   /** Knowledge Graph impact analysis */
   impactAnalysis?: ImpactAnalysis;
   /** Code Registry 요약 (영향 파일별 상태) */
@@ -154,7 +226,11 @@ function buildDraftPrompt(
 
   parts.push(`# Draft Analysis
 
-Analyze this task and provide a structured assessment. Be concise.
+You are a senior engineer preparing a COMPLETE work brief for an autonomous worker
+that will rely ENTIRELY on this brief. A vague brief causes the worker to scaffold
+and stop early, forcing rework — so be specific and grounded in the actual code
+(reference real files, functions, call sites; read them when unsure). Do not defer
+the hard parts.
 
 ## Task
 - **Title:** ${options.taskTitle}
@@ -192,12 +268,29 @@ Analyze this task and provide a structured assessment. Be concise.
 ## Output Format (JSON only, no explanation)
 \`\`\`json
 {
-  "taskType": "bugfix" | "feature" | "refactor" | "docs" | "test" | "config" | "unknown",
-  "intentSummary": "What this task is really asking for (1-2 sentences)",
-  "relevantFiles": ["file paths that likely need changes"],
-  "suggestedApproach": "How to approach this (1-3 sentences)"
+  "taskType": "bugfix" | "feature" | "refactor" | "docs" | "test" | "config" | "<a more specific type if none fit>",
+  "intentSummary": "What this task is really asking for (1-2 sentences, concrete)",
+  "relevantFiles": ["actual file paths that need changes — at least one"],
+  "suggestedApproach": "How to approach this, referencing real files/functions (1-3 sentences)",
+  "completionCriteria": ["execution-grounded definition of done — each item independently verifiable with EVIDENCE"]
 }
 \`\`\`
+
+### taskType
+The 6 types above are examples (few-shot), not a closed set — if the task fits a
+more precise label (e.g. "perf", "security", "ci", "release"), use it. Avoid
+"unknown" unless the task is genuinely unclassifiable.
+
+### completionCriteria (most important)
+Write what "done" objectively means, in terms the reviewer can check with EVIDENCE.
+Each criterion must be a runtime/observable fact, NOT mere existence of code:
+- GOOD: "resolve_turn_model is invoked from streaming.py (cite the call site)",
+  "bench.json artifact is produced by one command", "before/after turn counts
+  reported for the IKEA example", "added test covers the failure path and passes".
+- BAD: "function is defined", "harness is scaffolded", "prompt rule added"
+  (these are wiring, not done). Never list a criterion that can be satisfied by
+  scaffolding alone. Do NOT defer core work to "follow-up" — fold it into a
+  criterion. Produce 2–5 criteria.
 `);
 
   return parts.join('\n');
@@ -211,21 +304,27 @@ function parseDraftResponse(output: string): Partial<DraftAnalysis> {
   const jsonMatch = output.match(/```json\s*([\s\S]*?)\s*```/);
   const jsonStr = jsonMatch?.[1] ?? findJsonObject(output);
   if (!jsonStr) {
-    return { taskType: 'unknown', intentSummary: '', relevantFiles: [], suggestedApproach: '' };
+    return { taskType: 'unknown', intentSummary: '', relevantFiles: [], suggestedApproach: '', completionCriteria: [] };
   }
 
   try {
     const parsed = JSON.parse(jsonStr);
+    // taskType is now few-shot, not a closed set (INT-1916): accept any non-empty
+    // string the model returns, only falling back to 'unknown' when truly absent.
+    const taskType = typeof parsed.taskType === 'string' && parsed.taskType.trim()
+      ? parsed.taskType.trim()
+      : 'unknown';
     return {
-      taskType: ['bugfix', 'feature', 'refactor', 'docs', 'test', 'config'].includes(parsed.taskType)
-        ? parsed.taskType
-        : 'unknown',
+      taskType: taskType as DraftAnalysis['taskType'],
       intentSummary: typeof parsed.intentSummary === 'string' ? parsed.intentSummary : '',
       relevantFiles: Array.isArray(parsed.relevantFiles) ? parsed.relevantFiles : [],
       suggestedApproach: typeof parsed.suggestedApproach === 'string' ? parsed.suggestedApproach : '',
+      completionCriteria: Array.isArray(parsed.completionCriteria)
+        ? parsed.completionCriteria.filter((c: unknown): c is string => typeof c === 'string' && c.trim().length > 0)
+        : [],
     };
   } catch {
-    return { taskType: 'unknown', intentSummary: '', relevantFiles: [], suggestedApproach: '' };
+    return { taskType: 'unknown', intentSummary: '', relevantFiles: [], suggestedApproach: '', completionCriteria: [] };
   }
 }
 
@@ -245,6 +344,42 @@ function findJsonObject(text: string): string | null {
   return null;
 }
 
+function getDraftFallbackAdapters(primary: AdapterName): AdapterName[] {
+  const fallbackMap: Partial<Record<AdapterName, AdapterName>> = {
+    codex: 'claude',
+    'codex-responses': 'claude',
+    claude: 'codex',
+  };
+
+  const fallback = fallbackMap[primary];
+  return fallback && fallback !== primary ? [primary, fallback] : [primary];
+}
+
+function isProviderQuotaError(message?: string): boolean {
+  if (!message) return false;
+  const text = message.toLowerCase();
+
+  const hasQuotaSignal = /\bquota\b/.test(text);
+  const hasRateLimit = /\brate[-\s]?limit\b/.test(text);
+  const hasTooManyRequests = /\btoo many requests\b/.test(text);
+  const hasInsufficientQuota = /\binsufficient[_-]?quota\b/.test(text);
+  const hasUsageLimit = /\busage\b.*\blimit\b/.test(text) || /\blimit\b.*\busage\b/.test(text);
+  const hasExceededPair = /\bexceeded\b/.test(text) && /\b(quota|limit|usage)\b/.test(text);
+  const has429 = /\b429\b/.test(text) && (/\brequest\b/.test(text) || /rate/.test(text));
+  const hasBilling = /\bbilling\b/.test(text);
+
+  return (
+    hasQuotaSignal ||
+    hasRateLimit ||
+    hasTooManyRequests ||
+    hasInsufficientQuota ||
+    hasUsageLimit ||
+    hasExceededPair ||
+    has429 ||
+    hasBilling
+  );
+}
+
 // ============ 메인 실행 ============
 
 /**
@@ -259,6 +394,10 @@ function findJsonObject(text: string): string | null {
 export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<DraftAnalysis> {
   const startTime = Date.now();
   const { onLog } = options;
+  const primaryAdapterName = getDefaultAdapterName();
+  const adaptersToTry = [...new Set(getDraftFallbackAdapters(primaryAdapterName))];
+  let lastError: unknown;
+  let succeeded = false;
 
   onLog?.('[Draft] Starting pre-analysis...');
 
@@ -284,8 +423,6 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
   }
 
   // 3. Fast model draft analysis (~3s) — model resolves from the adapter when unset
-  const adapter = getAdapter();
-  const model = options.model ?? await adapter.getDefaultModel();
   const prompt = buildDraftPrompt(options, codeContext, impactAnalysis);
 
   let haikuResult: Partial<DraftAnalysis> = {
@@ -293,21 +430,68 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
     intentSummary: '',
     relevantFiles: [],
     suggestedApproach: '',
+    completionCriteria: [],
   };
+  let draftSufficient = false;
 
-  try {
-    const raw = await spawnCli(adapter, {
-      prompt,
-      cwd: '/tmp',  // 중립 디렉토리 (Planner와 동일)
-      timeoutMs: options.timeoutMs ?? 30000,
-      model,
-      maxTurns: 1,
-    });
+  // outer: per-adapter (primary → quota fallback). inner: drafter hard-gate retries.
+  outer:
+  for (let i = 0; i < adaptersToTry.length; i += 1) {
+    const adapterName = adaptersToTry[i];
+    const isFallbackAttempt = i > 0;
+    const adapter = getAdapter(adapterName);
+    // Explicit per-provider drafter model (INT-1915); options.model overrides on the
+    // primary adapter only, then DRAFT_MODELS, then the adapter's own default.
+    const override = isFallbackAttempt ? undefined : options.model;
+    const resolvedModel = override ?? DRAFT_MODELS[adapterName] ?? await adapter.getDefaultModel();
 
-    haikuResult = parseDraftResponse(raw.stdout);
-    onLog?.(`[Draft] Haiku: type=${haikuResult.taskType}, files=${haikuResult.relevantFiles?.length ?? 0}`);
-  } catch (err) {
-    onLog?.(`[Draft] Haiku analysis failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+    if (isFallbackAttempt) {
+      onLog?.(`[Draft] Usage limit on ${adaptersToTry[i - 1]}, fallback to ${adapterName}`);
+    }
+
+    // drafter hard gate (INT-1917): retry until the brief is faithful enough.
+    for (let attempt = 1; attempt <= DRAFT_MAX_ATTEMPTS; attempt += 1) {
+      const attemptPrompt = attempt === 1 ? prompt : prompt + DRAFT_RETRY_NUDGE;
+      try {
+        const raw = await spawnCli(adapter, {
+          prompt: attemptPrompt,
+          cwd: options.projectPath, // read the real repo (INT-1917) — was '/tmp'
+          timeoutMs: options.timeoutMs ?? 30000,
+          model: resolvedModel,
+          maxTurns: 3, // allow read_file/search_files — was 1 (couldn't read code)
+        });
+
+        haikuResult = parseDraftResponse(raw.stdout);
+        succeeded = true;
+        draftSufficient = isDraftSufficient(haikuResult);
+        onLog?.(`[Draft] ${adapterName}(${resolvedModel}) attempt ${attempt}: type=${haikuResult.taskType}, files=${haikuResult.relevantFiles?.length ?? 0}, criteria=${haikuResult.completionCriteria?.length ?? 0}, sufficient=${draftSufficient}`);
+        if (draftSufficient) break outer;
+        if (attempt < DRAFT_MAX_ATTEMPTS) {
+          onLog?.('[Draft] Brief insufficient — retrying with a stricter prompt');
+        }
+      } catch (err) {
+        lastError = err;
+        const errMsg = err instanceof Error ? err.message : String(err);
+        onLog?.(`[Draft] analysis failed (${adapterName}): ${errMsg}`);
+
+        if (!isFallbackAttempt && isProviderQuotaError(errMsg) && adaptersToTry.length > 1) {
+          break; // break inner → try the fallback adapter
+        }
+        // Non-quota failure: stop entirely, continue pipeline with best-effort data.
+        break outer;
+      }
+    }
+    // Got a response from this adapter (sufficient or best-effort after retries).
+    // Only quota errors (which leave succeeded=false) cascade to the fallback
+    // adapter — insufficiency does not, to bound cost.
+    if (succeeded) break;
+  }
+
+  if (!succeeded && lastError) {
+    onLog?.(`[Draft] analysis failed (non-blocking): ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  }
+  if (succeeded && !draftSufficient) {
+    onLog?.('[Draft] ⚠️ Brief still insufficient after retries — worker will be told to investigate thoroughly itself');
   }
 
   const durationMs = Date.now() - startTime;
@@ -318,6 +502,8 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
     intentSummary: haikuResult.intentSummary ?? '',
     relevantFiles: haikuResult.relevantFiles ?? [],
     suggestedApproach: haikuResult.suggestedApproach ?? '',
+    completionCriteria: haikuResult.completionCriteria ?? [],
+    sufficient: draftSufficient,
     impactAnalysis: impactAnalysis ?? undefined,
     registrySnapshot: codeContext.registrySnapshot,
     projectStats: codeContext.projectStats,

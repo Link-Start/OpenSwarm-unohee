@@ -665,6 +665,8 @@ export async function executePipeline(
         relevantFiles: draftResult.relevantFiles,
         suggestedApproach: draftResult.suggestedApproach,
         projectStats: draftResult.projectStats,
+        completionCriteria: draftResult.completionCriteria,
+        sufficient: draftResult.sufficient,
         impactAnalysis: draftResult.impactAnalysis,
         registrySnapshot: draftResult.registrySnapshot,
       } : undefined,

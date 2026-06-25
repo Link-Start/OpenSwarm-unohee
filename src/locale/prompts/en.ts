@@ -96,18 +96,35 @@ Apply the above feedback and make corrections.
       contextSection = parts.join('\n') + '\n';
     }
 
+    // Definition of Done — the hard gate (INT-1914). Each criterion must be met
+    // with concrete evidence; deferring to "follow-up" does NOT count as done.
+    let completionSection = '';
+    const da = context?.draftAnalysis;
+    if (da?.completionCriteria && da.completionCriteria.length > 0) {
+      const lines = ['## Definition of Done (satisfy EVERY item — with evidence)'];
+      for (const c of da.completionCriteria) lines.push(`- [ ] ${c}`);
+      lines.push('');
+      lines.push('For each item, your final summary MUST state the concrete evidence (file:line of the wiring/call site, command output, produced artifact, before/after numbers). Deferring any item to "follow-up"/"post-merge" counts as NOT done — do it now or report a blocker. Scaffolding (defining a function, adding a prompt rule) without wiring/exercising it does NOT satisfy a criterion.');
+      lines.push('');
+      completionSection = lines.join('\n') + '\n';
+    }
+    if (da && da.sufficient === false) {
+      completionSection += '\n⚠️ The pre-analysis brief was incomplete. Investigate the codebase thoroughly yourself (read_file/search_files) before editing — do not rely on the brief alone.\n';
+    }
+
     return `# Worker Agent
 
 ## Task
 - **Title:** ${taskTitle}
 - **Description:** ${taskDescription}
-${feedbackSection}${contextSection}
+${feedbackSection}${contextSection}${completionSection}
 ## Rules
 - Search codebase thoroughly before concluding. Use Grep/Read — don't guess.
 - Verify changes compile before reporting success.
 - If uncertain, report clearly — don't implement workarounds.
 - No destructive commands (rm -rf, git reset --hard). No .env/.bashrc edits.
 - Before completing: verify all changed files exist, no syntax errors, confidence reflects reality.
+- Address EVERY Definition of Done item with evidence — do not stop at scaffolding or defer core work.
 
 ## Tools available
 Use search_files (ripgrep) + read_file as your primary navigation. They're always available and cheapest.
@@ -132,31 +149,38 @@ Otherwise no JSON is needed — finishing without an error IS the success signal
 `;
   },
 
-  buildReviewerPrompt({ taskTitle, taskDescription, workerReport }) {
+  buildReviewerPrompt({ taskTitle, taskDescription, workerReport, completionCriteria }) {
+    const criteriaSection = completionCriteria && completionCriteria.length > 0
+      ? `\n## Definition of Done (HARD GATE — verify each with evidence)
+${completionCriteria.map(c => `- ${c}`).join('\n')}
+
+For EACH criterion, confirm concrete evidence in the actual diff (call site / wiring file:line, produced artifact, command output, before/after numbers). Do NOT trust the worker's self-report — verify against the changed files. If ANY criterion lacks evidence, or any core work was deferred to "follow-up"/"post-merge", you MUST choose **revise** (never approve). Scaffolding without wiring/execution does not satisfy a criterion.
+`
+      : '';
     return `# Reviewer Agent
 
 ## Original Task
 - **Title:** ${taskTitle}
 - **Description:** ${taskDescription}
-
+${criteriaSection}
 ## Worker's Report
 ${workerReport}
 
 ## Review Criteria
-1. Does the work meet the requirements?
+1. Does the work meet the requirements (every Definition of Done item, with evidence)?
 2. Is the code quality adequate? (readability, maintainability)
-3. Are there any missing parts?
+3. Are there any missing parts or deferred core work?
 4. Are there risks or side effects?
 5. Are tests needed or missing?
 
 ## Decision Options
-- **approve**: Work complete, approved. Requirements met, quality adequate
-- **revise**: Revision needed. Must provide specific feedback
+- **approve**: Work complete, approved. EVERY Definition of Done item is met with verified evidence, quality adequate
+- **revise**: Revision needed (any criterion unmet/unverified, or core work deferred). Must provide specific feedback
 - **reject**: Fundamental issues. Cannot be fixed through revision
 
 ## Instructions
-1. Check the changed files (use Read tool)
-2. Evaluate code quality and requirement fulfillment
+1. Check the changed files (use Read tool) — verify evidence, don't trust the report
+2. Evaluate code quality and requirement fulfillment against every Definition of Done item
 3. List specific problems if any
 4. Suggest improvements if applicable
 5. Make your final decision

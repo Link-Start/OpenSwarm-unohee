@@ -21,6 +21,8 @@ export interface ReviewerOptions {
   maxTurns?: number;           // Max agentic turns per CLI invocation
   adapterName?: AdapterName;
   processContext?: ProcessContext;
+  /** Execution-grounded definition of done to hard-gate on (INT-1914). */
+  completionCriteria?: string[];
   /** Abort the run + in-flight adapter call (pipeline cancel / project disable). */
   signal?: AbortSignal;
 }
@@ -100,6 +102,7 @@ ${options.workerResult.error ? `- **Error:** ${options.workerResult.error}` : ''
     taskTitle: options.taskTitle,
     taskDescription: options.taskDescription,
     workerReport,
+    completionCriteria: options.completionCriteria,
   });
 }
 
