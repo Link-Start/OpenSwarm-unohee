@@ -24,6 +24,17 @@ const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
 const DEFAULT_MODEL = 'gpt-5.5';
 const PROFILE_KEY = 'openai-gpt:default';
 
+// gpt-5.3-codex-spark read-paralyzes in our agentic worker harness — 0 edits at 458k
+// tokens across edit_file AND apply_patch AND nudge AND guidance (verified 2026-06-25),
+// while every other codex model from gpt-5.4-mini up edits fine. It must NEVER run as a
+// worker here, whether picked by default or requested explicitly — substitute the
+// cheapest capable model.
+const SPARK_MODEL = 'gpt-5.3-codex-spark';
+const SAFE_CHEAP_MODEL = 'gpt-5.4-mini';
+export function substituteSpark(model: string): string {
+  return model === SPARK_MODEL ? SAFE_CHEAP_MODEL : model;
+}
+
 // ---- Responses API wire types (the subset we send/receive) ----
 
 interface ResponsesTool {
@@ -290,8 +301,8 @@ export class CodexResponsesAdapter implements CliAdapter {
     // matches no jobProfile) would silently pick the one broken model. Exclude it and
     // prefer the cheapest capable model. Roles/profiles that pass an explicit model
     // are unaffected.
-    const ids = (await getCodexModelIds()).filter((m) => m !== 'gpt-5.3-codex-spark');
-    return ids.find((m) => m === 'gpt-5.4-mini') ?? ids[0] ?? DEFAULT_MODEL;
+    const ids = (await getCodexModelIds()).filter((m) => m !== SPARK_MODEL);
+    return ids.find((m) => m === SAFE_CHEAP_MODEL) ?? ids[0] ?? DEFAULT_MODEL;
   }
 
   async run(options: CliRunOptions): Promise<CliRunResult> {
@@ -317,7 +328,11 @@ export class CodexResponsesAdapter implements CliAdapter {
       };
     }
 
-    const model = options.model ?? await this.getDefaultModel();
+    const requestedModel = options.model ?? await this.getDefaultModel();
+    const model = substituteSpark(requestedModel);
+    if (model !== requestedModel) {
+      options.onLog?.(`[codex-responses] ${requestedModel} read-paralyzes in the agentic harness — using ${model} instead.`);
+    }
     // Stream the model's reasoning summary to the live log as 💭 thoughts.
     const onReasoning = options.onLog ? (line: string) => options.onLog!(`💭 ${line}`) : undefined;
     // Stable prompt_cache_key so every turn of THIS run routes to the same cache

@@ -1,7 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { chatToResponsesInput, toolsToResponsesTools, reduceResponsesEvents, resolveReasoningEffort } from './codexResponses.js';
+import { chatToResponsesInput, toolsToResponsesTools, reduceResponsesEvents, resolveReasoningEffort, substituteSpark } from './codexResponses.js';
 import type { ChatMessage } from './agenticLoop.js';
 import type { ToolDefinition } from './tools.js';
+
+describe('substituteSpark', () => {
+  it('replaces gpt-5.3-codex-spark with the safe cheap model', () => {
+    expect(substituteSpark('gpt-5.3-codex-spark')).toBe('gpt-5.4-mini');
+  });
+  it('leaves every other model untouched', () => {
+    for (const m of ['gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5', 'gpt-5-codex']) {
+      expect(substituteSpark(m)).toBe(m);
+    }
+  });
+});
 
 describe('chatToResponsesInput', () => {
   it('lifts system messages into instructions and keeps user/assistant as input', () => {
