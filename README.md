@@ -77,8 +77,12 @@ openswarm review                 # Review the working-tree changes
 openswarm review --max           # Full-codebase audit: fan reviewer subagents over areas
                                  #   → report at .openswarm/audit/ + PM-synthesized Linear
                                  #   issues by default (≤10 cohesive, master + sub-issues)
-                                 #   --no-linear (report only), --issues-per-area (legacy spray),
-                                 #   --issues <id> (set parent), --fallback <adapter>, --out <file>
+openswarm review --max --fix     # after the audit, a worker per flagged area applies the
+                                 #   fixes in the working tree (review the diff, then commit)
+openswarm review --max --concurrency 8   # widen the fan-out — areas auto-split to fill the pool
+                                 # more --max flags: --no-linear (report only) · --issues-per-area
+                                 #   (legacy spray) · --issues <id> (set parent) · --fallback
+                                 #   <adapter> · --out <file> · --dry-run (print the plan)
 
 # Code Registry & BS Detector
 openswarm check --scan           # Scan repo → register all entities
@@ -272,6 +276,7 @@ openswarm dash                # open the web dashboard (:3847)
 - **BS Detector** — Built-in static analysis engine that detects bad code patterns (empty catch, hardcoded secrets, `as any`, etc.) with pipeline guard integration
 - **Autonomous Pipeline** — Cron-driven heartbeat fetches Linear issues, runs Worker/Reviewer pair loops, and updates issue state automatically
 - **Worker/Reviewer Pairs** — Multi-iteration code generation with automated review, testing, and documentation stages
+- **Codebase Audit (`review --max`)** — fans reviewer subagents out over directory-shaped areas (auto-split to fill `--concurrency`), aggregates a deduped verdict into a markdown report, and synthesizes ≤10 cohesive Linear issues via a PM agent. `--fix` sends a worker per flagged area to apply the fixes in the working tree. Language-agnostic; codex usage-limit aware with automatic `claude` fallback
 - **Decision Engine** — Scope validation, rate limiting, priority-based task selection, and workflow mapping
 - **Cognitive Memory** — LanceDB vector store with Xenova/multilingual-e5-base embeddings for long-term recall across sessions
 - **Repo Knowledge Loop** — workers learn each repository over time: task outcomes (success patterns, review-rejection pitfalls) are stored per-repo and recalled into the next worker prompt
@@ -498,65 +503,12 @@ the CLI (fire-and-forget with a short timeout, and failures are silently ignored
 
 ## Changelog
 
-### v0.8.1
-- **License** — relicensed to **MIT** (was GPL-3.0)
-- **Docs** — README overhauled for first-time users (`openswarm init` walkthrough, accurate adapter registry, latest-build models) and contributor health files added (CONTRIBUTING, Code of Conduct, Security policy, PR template)
+Full version history lives in **[CHANGELOG.md](CHANGELOG.md)** and the
+[GitHub Releases](https://github.com/unohee/OpenSwarm/releases) page.
 
-### v0.8.0
-- **Interactive `openswarm init` wizard** — Linear OAuth (PKCE) sign-in with arrow-key team/project picker, provider auto-detection, and a validated `config.yaml` (INT-1808)
-- **`openswarm doctor`** — one-shot environment diagnostics: Node version, native modules, provider CLIs, ports, and config discovery
-- **Linear OAuth login** — `openswarm auth login --provider linear` (PKCE, no API-key entry)
-- **CLI polish** — ASCII banner and colored output (NO_COLOR / non-TTY aware)
-- **Autonomy hardening** — dependency-order gating + Backlog parking (INT-1809), daemon self-modify guards (INT-1810), `jobProfiles` partial roles carried through to runtime (INT-1812), and an `init` symlink guard that refuses to overwrite the daemon's global config
-- **Fix** — codex adapter `--full-auto` → `--sandbox workspace-write` (codex 0.137 deprecation) (INT-1699)
-
-### v0.5.0
-- **Native Codex Responses-API adapter** (`codex-responses`) — ChatGPT OAuth, no CLI binary required; live model discovery via the OAuth backend
-- **Linear-optional autonomy** — `ITaskSource` abstraction + local SQLite task source; the autonomous runner no longer requires Linear
-- **Notifier abstraction** — Discord / Slack / Telegram / webhook
-- **Agentic loop tools** — `web_fetch` + `web_search`
-- **Planner cockpit TUI** — `/plan` decompose → approve → dispatch
-- **Loop maturity (INT-1679)** — bad-edit guard + reflection self-repair loop
-- **Conflict-free concurrency (INT-1610)** — blocker/dependency ordering for parallel workers; worker instructions + actions logged to issue comments
-
-### v0.4.0
-- **Benchmarks (L0–L6)** — difficulty rubric, model-routing benchmark, and a real SWE-bench harness
-- **Repo knowledge loop** — workers learn each repository across tasks (per-repo success patterns + review-rejection pitfalls recalled into prompts)
-- **OpenRouter agentic adapter** — native tool loop with harness hardening from SWE-bench findings
-- **LM Studio adapter** with auto model selection
-- **CLI** — `openswarm dash`, `--tree` / `--ci` flags for `check`
-
-### v0.3.0
-- **Code Registry**: `openswarm check --scan` scans repo, registers 1000+ entities across 8 languages (TS, Python, Go, Rust, Java, C, C++, C#) with test mapping, complexity scoring, and risk assessment
-- **BS Detector**: `openswarm check --bs` — built-in static analysis for bad code patterns, pipeline guard integration
-- **Local Model Support**: Ollama, LMStudio, llama.cpp via single `local` adapter with auto-detection
-- **GPT Adapter**: OpenAI models via OAuth PKCE flow
-- **Local Issue Tracker**: SQLite + GraphQL + Kanban web UI at `:3847/issues`
-- **CLI**: `openswarm check`, `openswarm annotate` commands
-
-### v0.2.2
-- `openswarm` without arguments now launches TUI chat directly
-
-### v0.2.1
-- Security: patched lodash, picomatch, rollup, undici, yaml vulnerabilities
-
-### v0.2.0
-- Published as `@intrect/openswarm` on npm
-- Extracted `@intrect/claude-driver` as standalone zero-dependency package
-- Autonomous runner hardening and multi-project orchestration
-- Task-state rehydration from Linear comments
-- `--verbose` flag for detailed execution logging
-- Codex adapter: dropped o-series model override
-
-### v0.1.0
-- Initial release
-- Worker/Reviewer pair pipeline
-- Claude Code CLI + Codex CLI adapters
-- Discord bot control
-- Linear integration
-- LanceDB cognitive memory
-- Web dashboard (port 3847)
-- Rich TUI chat interface
+Latest — **v0.11.0**: `review --max --fix` (a worker per flagged area applies the
+audit fixes in the working tree) and concurrency-saturating area distribution
+(areas auto-split to fill `--concurrency`). See CHANGELOG.md for the rest.
 
 ---
 

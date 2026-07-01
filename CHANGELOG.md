@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.0 — 2026-07-01
+
+Wider, faster codebase audits — plus the audit can now fix what it finds.
+
+### Added
+
+- **`review --max --fix`** — after the audit, a worker subagent is fanned out per flagged (revise/reject) area and applies that area's reviewer findings to its files. Edits land in the **working tree only** — no commit, no re-review — so you review the diff before committing. Uses the same `--concurrency` as the review. (INT-2249)
+- **Concurrency-saturating area distribution** — `review --max` previously ran one reviewer per directory, so a 2-directory repo used only 2 subagents even at `--concurrency 8`. Areas now auto-split until the fan-out fills the pool (floored at one file per area), and it stays a no-op when the directory partition already saturates it. Faster wall-clock on wide audits. (INT-2249)
+
+### Changed
+
+- **Unified CLI/TUI status design** — glyphs (`◐ ✓ ✗ ⚠ ✎`) and the braille spinner are now single-sourced (`src/support/glyphs.ts`), consumed by both the Ink TUI (`<StatusIcon>` / `<Spinner>` + `theme.STATUS`) and plain console output (`status` in `src/support/colors.ts`). Consequences: the **worker now shows the same animated spinner heartbeat as the reviewer** (it was a static line), the `review --max` verdict and `--fix` output are colored consistently (and stay ANSI-free when piped / under `NO_COLOR`), and drifting glyphs (`▶`→`◐`, `●`→`✓`) and duplicate spinner frame sets are collapsed. (INT-2260)
+- **Multi-lens reviewer removed** — the opt-in multi-lens reviewer fan-out (PoC, shipped dormant in 0.10.0) is gone. A synthetic planted-defect A/B showed **zero detection uplift** over the single reviewer and **complete lens overlap** (every lens named every defect), so the 3× cost bought nothing. The reproducible A/B harness lives in `benchmarks/reviewLensAB.ts`. (INT-2230)
+
+### Fixed
+
+- **Project cancellation no longer aborts sibling paths** — disabling a project (e.g. `/dev/WAVE`) used a raw string prefix, so it could abort an unrelated running task under a sibling path like `/dev/WAVE-next`. Cancellation now matches the exact project path or a real descendant (worktree) path only, with path normalization. Thanks to [@ag-linden](https://github.com/ag-linden) for the fix. (#182)
+
 ## 0.10.2 — 2026-07-01
 
 ### Fixed
