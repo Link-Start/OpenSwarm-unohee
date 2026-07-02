@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.1 — 2026-07-02
+
+### Fixed
+
+- **Worktree PRs are actually created now** — the `gh` helper in `worktreeManager` ran with the daemon's own cwd (typically not a git repository, e.g. `$HOME`), so every `gh pr list` / `gh pr create` after a completed task died with `fatal: not a git repository` while the branch push succeeded — completed work stranded on remote branches with no PR (80 recorded failures; the only successes were when the daemon's cwd happened to be the target repo). `gh` now runs inside the task's worktree, mirroring the `git` helper. (INT-2327, #202)
+
 ## 0.17.0 — 2026-07-02
 
 ### Added
