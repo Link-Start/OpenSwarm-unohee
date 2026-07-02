@@ -514,10 +514,11 @@ the CLI (fire-and-forget with a short timeout, and failures are silently ignored
 Full version history lives in **[CHANGELOG.md](CHANGELOG.md)** and the
 [GitHub Releases](https://github.com/unohee/OpenSwarm/releases) page.
 
-Latest — **v0.17.0**: same-project parallel agents — round-robin task selection
-fills all worker slots (worktree-isolated, KG conflict detection defers real file
-overlaps), the per-project 5h task cap is gone, and vendored trees no longer
-poison conflict detection. See CHANGELOG.md for the rest.
+Latest — **v0.17.1**: worktree PRs are actually created now — `gh` used to run
+outside the repo and silently strand completed work on remote branches. Plus
+v0.17.0's same-project parallel agents (round-robin selection, worktree-isolated,
+KG conflict detection) and the removal of the per-project 5h task cap. See
+CHANGELOG.md for the rest.
 
 ---
 
