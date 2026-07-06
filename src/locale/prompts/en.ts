@@ -307,6 +307,7 @@ ${promptDataBlock(workerReport)}
 8. Scope: is the diff scoped to the task, or does it carry unrelated reformatting / scope creep that inflates cross-PR conflict surface?
 9. Plausibility: for any metric/number the change produces or reports, is its magnitude sane against an external reference (account size, prior runs, physical limits)? A DoD figure that's orders of magnitude off (e.g. from duplicated/unscaled input data) MUST be cross-checked before approving — passing unit tests on clean synthetic data does NOT vouch for a real-data figure.
 10. Invariants & self-regression: does the change violate an invariant the project documents (read its CLAUDE.md "Critical"/rules section)? Does something the diff newly introduces (a sweep, cleanup, deletion, TTL) break its own inputs or another in-flight flow — a regression the diff itself creates?
+11. Positional remapping after filtering: if the diff assigns values by position/order (array index, enumerate, zip, "next non-empty") instead of a fixed key/column, and any upstream step can drop or skip empty/optional cells, was it verified against a boundary input (a missing leading/middle field)? Dropping an empty slot before positional assignment silently shifts every field after it into the wrong role — a common, hard-to-notice regression in table/row parsers.
 
 ## Decision Options
 - **approve**: Work complete, approved. EVERY Definition of Done item is met with verified evidence, quality adequate

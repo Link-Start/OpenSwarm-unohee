@@ -262,6 +262,16 @@ describe('buildReviewerPrompt', () => {
     expect(ko).toContain('자기회귀');
   });
 
+  it('contains INT-2501 review criteria (positional remapping after empty-cell drop)', () => {
+    const result = enPrompts.buildReviewerPrompt(opts);
+    expect(result).toContain('Positional remapping after filtering');
+    expect(result).toContain('boundary input');
+    // ko mirror
+    const ko = koPrompts.buildReviewerPrompt(opts);
+    expect(ko).toContain('위치 기반 재매핑');
+    expect(ko).toContain('경계 입력');
+  });
+
   // Audit mode reframes the reviewer for diff-less, existing-file review. (INT-2006)
   describe('audit mode', () => {
     const auditOpts = {
