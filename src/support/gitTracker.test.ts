@@ -72,6 +72,19 @@ describe('gitTracker', () => {
     await expect(getChangedFiles(repo)).resolves.toContain('new-current.txt');
   });
 
+  it('with `since` set to a base ref, reports committed changes even with a clean working tree (CI `review --base` mode, INT-2552)', async () => {
+    const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
+    writeFileSync(join(repo, 'pr-change.txt'), 'pr work\n');
+    execFileSync('git', ['add', '-A'], { cwd: repo });
+    execFileSync('git', ['commit', '-m', 'pr commit'], { cwd: repo });
+
+    // A CI checkout of a PR branch has nothing dirty — the default (no `since`)
+    // path finds no working-tree changes at all.
+    await expect(getChangedFiles(repo)).resolves.toEqual([]);
+    // Diffing against the base ref finds the committed PR changes instead.
+    await expect(getChangedFiles(repo, baseSha)).resolves.toContain('pr-change.txt');
+  });
+
   describe('getWorkingDiffDetail', () => {
     it('reports per-file added/deleted for a tracked modification', async () => {
       writeFileSync(join(repo, 'tracked.txt'), 'tracked\nline2\nline3\n');

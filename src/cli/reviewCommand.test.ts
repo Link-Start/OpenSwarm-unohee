@@ -2,6 +2,11 @@ import { describe, it, expect, vi } from 'vitest';
 import { buildReviewWorkerResult, formatReviewOutput, runReviewCommand, resolveIssueFromBranch } from './reviewCommand.js';
 import type { ReviewResult } from '../agents/agentPair.js';
 
+// Only exercised by tests that do NOT override deps.getChangedFiles — every
+// other test in this file supplies its own stub, so this mock never affects them.
+const getChangedFilesMock = vi.fn(async () => ['x.ts']);
+vi.mock('../support/gitTracker.js', () => ({ getChangedFiles: getChangedFilesMock }));
+
 describe('buildReviewWorkerResult (INT-1955)', () => {
   it('synthesizes a WorkerResult from changed files', () => {
     const wr = buildReviewWorkerResult(['a.ts', 'b.ts']);
@@ -223,5 +228,32 @@ describe('runReviewCommand (INT-1955)', () => {
       },
     );
     expect(fileFollowups).not.toHaveBeenCalled();
+  });
+});
+
+describe('runReviewCommand --base (INT-2552)', () => {
+  it('forwards --base as the `since` arg to getChangedFiles (CI committed-diff mode)', async () => {
+    getChangedFilesMock.mockClear();
+    getChangedFilesMock.mockResolvedValueOnce(['x.ts']);
+    const review = vi.fn(async () => ({ decision: 'approve', feedback: 'ok' }) as ReviewResult);
+    await runReviewCommand({ base: 'origin/main' }, { review, log: () => {} });
+    expect(getChangedFilesMock).toHaveBeenCalledWith(process.cwd(), 'origin/main');
+  });
+
+  it('does not pass a `since` arg without --base (working-tree mode unchanged)', async () => {
+    getChangedFilesMock.mockClear();
+    getChangedFilesMock.mockResolvedValueOnce(['x.ts']);
+    const review = vi.fn(async () => ({ decision: 'approve', feedback: 'ok' }) as ReviewResult);
+    await runReviewCommand({}, { review, log: () => {} });
+    expect(getChangedFilesMock).toHaveBeenCalledWith(process.cwd(), undefined);
+  });
+
+  it('the no-changes message names the base ref instead of "working-tree"', async () => {
+    getChangedFilesMock.mockClear();
+    getChangedFilesMock.mockResolvedValueOnce([]);
+    const logs: string[] = [];
+    const out = await runReviewCommand({ base: 'origin/main' }, { log: (l) => logs.push(l) });
+    expect(out).toBeNull();
+    expect(logs.join('\n')).toContain('origin/main');
   });
 });

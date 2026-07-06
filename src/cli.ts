@@ -302,6 +302,7 @@ program
   .command('review')
   .description('Review the working-tree changes; --max audits the whole codebase with reviewer subagents')
   .option('--path <path>', 'Project path (default: cwd)')
+  .option('--base <ref>', 'Review the committed diff against this ref (e.g. origin/main) instead of working-tree changes — for CI on a checked-out PR branch')
   .option('--issues [parent]', 'File follow-ups as Linear sub-issues (parent inferred from the git branch, or pass an id)')
   .option('--issues-per-area [parent]', 'For --max: legacy per-area follow-up fan-out (skips the PM synthesis)')
   .option('--file [parent]', 'Alias for --issues (back-compat)')
@@ -321,7 +322,7 @@ program
   .option('--fix-rounds <n>', 'For --max --fix: max fix → re-review rounds before giving up (default 3)', parsePositiveIntegerOption)
   .option('--no-learn', 'For --max: do not record the audit findings into the repo knowledge memory')
   .action(async (opts: {
-    path?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean;
+    path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean;
     max?: boolean; concurrency?: number; maxFilesPerArea?: number; yes?: boolean; dryRun?: boolean;
     out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; fixRounds?: number; learn?: boolean;
   }) => {
@@ -351,7 +352,7 @@ program
         return;
       }
       const { runReviewCommand } = await import('./cli/reviewCommand.js');
-      const result = await runReviewCommand({ path: opts.path, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug });
+      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug });
       if (result && result.decision === 'reject') process.exitCode = 1;
     } catch (e) {
       console.error(e instanceof Error ? e.message : String(e));

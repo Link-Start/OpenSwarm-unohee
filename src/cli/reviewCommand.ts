@@ -134,6 +134,12 @@ export interface ReviewCommandOptions {
   adapter?: string;
   /** Verbose logging. */
   debug?: boolean;
+  /**
+   * Review the committed diff against this ref instead of the working tree
+   * (e.g. `origin/main`). For CI: a checked-out PR branch has no dirty
+   * working-tree changes to find, only commits ahead of its base. (INT-2552)
+   */
+  base?: string;
 }
 
 /**
@@ -155,10 +161,10 @@ export async function runReviewCommand(
   const cwd = opts.path ?? process.cwd();
   const log = deps.log ?? ((l: string) => console.log(l));
 
-  const getChangedFiles = deps.getChangedFiles ?? (async (c) => (await import('../support/gitTracker.js')).getChangedFiles(c));
+  const getChangedFiles = deps.getChangedFiles ?? (async (c) => (await import('../support/gitTracker.js')).getChangedFiles(c, opts.base));
   const changed = await getChangedFiles(cwd);
   if (!changed.length) {
-    log('No working-tree changes to review.');
+    log(opts.base ? `No changes vs ${opts.base} to review.` : 'No working-tree changes to review.');
     return null;
   }
   if (opts.debug) log(`Reviewing ${changed.length} changed file(s): ${changed.join(', ')}`);
@@ -168,8 +174,10 @@ export async function runReviewCommand(
     (async (wr: WorkerResult, c: string, onLog?: (line: string) => void) => {
       const { runReviewer } = await import('../agents/reviewer.js');
       return runReviewer({
-        taskTitle: 'CLI working-tree review',
-        taskDescription: 'Review the current working-tree changes for correctness, bugs, and follow-ups.',
+        taskTitle: opts.base ? `CLI committed-diff review (vs ${opts.base})` : 'CLI working-tree review',
+        taskDescription: opts.base
+          ? `Review the committed changes against ${opts.base} for correctness, bugs, and follow-ups.`
+          : 'Review the current working-tree changes for correctness, bugs, and follow-ups.',
         workerResult: wr,
         projectPath: c,
         adapterName: opts.adapter as never,
