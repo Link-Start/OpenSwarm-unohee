@@ -444,3 +444,107 @@ describe('resolveBaseRef / createWorktree on non-main-default repos (INT-2545)',
     git(repo, 'worktree', 'remove', '--force', info.worktreePath);
   });
 });
+
+describe('unsafe binary staging guard (INT-2430)', () => {
+  let root: string;
+  let repo: string;
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { stdio: 'pipe' });
+
+  function fakeGh(): void {
+    const bin = join(root, 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'gh'),
+      '#!/bin/sh\ncase "$*" in *"pr create"*) echo "https://example.test/created";; *"pr list"*) echo "[]";; esac\n');
+    chmodSync(join(bin, 'gh'), 0o755);
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+  }
+
+  beforeEach(() => {
+    root = join(tmpdir(), `openswarm-binary-guard-${process.pid}-${Date.now()}`);
+    repo = join(root, 'repo');
+    mkdirSync(repo, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('strips a mis-staged .duckdb/.parquet binary from the commit but keeps the real source change', async () => {
+    const originBare = join(root, 'origin.git');
+    execFileSync('git', ['init', '--bare', '-b', 'main', originBare], { stdio: 'pipe' });
+    execFileSync('git', ['init', '-b', 'main', repo], { stdio: 'pipe' });
+    git(repo, 'config', 'user.email', 'test@example.com');
+    git(repo, 'config', 'user.name', 'Test');
+    git(repo, 'config', 'commit.gpgsign', 'false');
+
+    // A tracked binary data file, as if checked out via LFS smudge in the real repo.
+    writeFileSync(join(repo, 'data.duckdb'), Buffer.from([0x01, 0x02, 0x03]));
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'index.ts'), 'export const x = 1;\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'init');
+    git(repo, 'remote', 'add', 'origin', originBare);
+    git(repo, 'push', 'origin', 'main');
+
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-test');
+
+    // Simulate the filter-bypass mis-stage (INT-2430): the worker's `git status`
+    // workaround made this untouched binary look "modified", so it edits it too.
+    writeFileSync(join(info.worktreePath, 'data.duckdb'), Buffer.from([0x01, 0x02, 0x03, 0x04]));
+    // A real, in-scope source change that must survive the guard.
+    writeFileSync(join(info.worktreePath, 'src', 'index.ts'), 'export const x = 2;\n');
+    // A new .parquet the worker also (mistakenly) added.
+    writeFileSync(join(info.worktreePath, 'cache.parquet'), Buffer.from([0x05, 0x06]));
+
+    const prevPath = process.env.PATH;
+    fakeGh();
+    try {
+      await commitAndCreatePR(info, 'Test change', 'INT-1', 'desc');
+    } finally {
+      process.env.PATH = prevPath;
+    }
+
+    const committedFiles = git(info.worktreePath, 'diff', '--name-only', 'HEAD~1', 'HEAD').toString();
+    expect(committedFiles).not.toContain('data.duckdb');
+    expect(committedFiles).not.toContain('cache.parquet');
+    expect(committedFiles).toContain('src/index.ts');
+
+    // Unstaged, not deleted — still present on disk, just never committed.
+    expect(existsSync(join(info.worktreePath, 'data.duckdb'))).toBe(true);
+    expect(existsSync(join(info.worktreePath, 'cache.parquet'))).toBe(true);
+
+    git(repo, 'worktree', 'remove', '--force', info.worktreePath);
+  });
+
+  it('commits normally when no unsafe binary is staged', async () => {
+    const originBare = join(root, 'origin.git');
+    execFileSync('git', ['init', '--bare', '-b', 'main', originBare], { stdio: 'pipe' });
+    execFileSync('git', ['init', '-b', 'main', repo], { stdio: 'pipe' });
+    git(repo, 'config', 'user.email', 'test@example.com');
+    git(repo, 'config', 'user.name', 'Test');
+    git(repo, 'config', 'commit.gpgsign', 'false');
+
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'index.ts'), 'export const x = 1;\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'init');
+    git(repo, 'remote', 'add', 'origin', originBare);
+    git(repo, 'push', 'origin', 'main');
+
+    const info = await createWorktree(repo, 'INT-2', 'swarm/INT-2-test');
+    writeFileSync(join(info.worktreePath, 'src', 'index.ts'), 'export const x = 2;\n');
+
+    const prevPath = process.env.PATH;
+    fakeGh();
+    try {
+      await commitAndCreatePR(info, 'Test change', 'INT-2', 'desc');
+    } finally {
+      process.env.PATH = prevPath;
+    }
+
+    const committedFiles = git(info.worktreePath, 'diff', '--name-only', 'HEAD~1', 'HEAD').toString();
+    expect(committedFiles.trim()).toBe('src/index.ts');
+
+    git(repo, 'worktree', 'remove', '--force', info.worktreePath);
+  });
+});

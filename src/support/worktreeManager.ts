@@ -360,7 +360,34 @@ export async function createWorktree(
   // worker can actually install / run tests / verify against real data. (INT-2415)
   await linkSharedPaths(repoPath, worktreePath);
 
+  // Self-heal a broken LFS smudge in the fresh checkout. A failed smudge is what
+  // pushes a worker to bypass the clean filter (`-c filter.lfs.clean=`) when `git
+  // status` errors on it — the actual trigger for the filter-bypass corruption
+  // guardLfsFilterCorruption defends against below. (INT-2430)
+  await ensureLfsSmudged(worktreePath);
+
   return { worktreePath, branchName, originalPath: repoPath, issueId };
+}
+
+/** True if the worktree's .gitattributes declares any LFS-filtered path. */
+function repoUsesLfs(worktreePath: string): boolean {
+  try {
+    return /filter=lfs\b/.test(readFileSync(join(worktreePath, '.gitattributes'), 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Best-effort: re-pull LFS objects so tracked files are real content on disk, not
+ * literal pointer text (a failed/partial smudge). No-op (swallowed) for repos that
+ * don't use LFS or when git-lfs isn't installed. (INT-2430)
+ */
+async function ensureLfsSmudged(worktreePath: string): Promise<void> {
+  if (!repoUsesLfs(worktreePath)) return;
+  await git(worktreePath, 'lfs', 'pull').catch((e) =>
+    console.warn(`[Worktree] git lfs pull self-heal failed (non-fatal): ${worktreePath}`, e instanceof Error ? e.message : e),
+  );
 }
 
 // File-overlap report (INT-2388 defect #3 / INT-2392)
@@ -413,6 +440,39 @@ export function formatOverlapReport(overlaps: FileOverlap[]): string {
 /** Split git/gh newline output into a trimmed, non-empty list. */
 function toLines(out: string): string[] {
   return out.split('\n').map(s => s.trim()).filter(Boolean);
+}
+
+// Unsafe binary staging guard (INT-2430)
+//
+// When a worker hits a permission error running `git status` on an LFS-tracked
+// repo, it can work around it with `-c filter.lfs.clean= -c filter.lfs.smudge=`.
+// That makes every already-smudged LFS binary (real content on disk) look
+// "modified" against its pointer, and the worker mistakes them for its own
+// changes — the subsequent `git add -A` (worker's or ours, right before commit)
+// stages them for real. An automated code-change commit has no legitimate reason
+// to touch a data dump, so these extensions are excluded outright regardless of
+// *why* they ended up staged. Real incident: PR #213/STONKS committed
+// nas_data/fnguide/*.duckdb and models/validated_features/*.parquet this way —
+// reverted by hand.
+const UNSAFE_BINARY_DATA_RE = /\.(duckdb|parquet|pkl|pt)$/i;
+
+/** Unstage any staged file matching an unsafe binary-data extension so it can
+ *  never reach the commit. Best-effort — a failed unstage is logged, not thrown,
+ *  since letting the binary through would be strictly worse. */
+async function guardUnsafeBinaryStaging(worktreePath: string): Promise<void> {
+  const staged = toLines(await git(worktreePath, 'diff', '--cached', '--name-only').catch(() => ''));
+  const unsafe = staged.filter((f) => UNSAFE_BINARY_DATA_RE.test(f));
+  if (unsafe.length === 0) return;
+
+  console.warn(
+    `[Worktree] Unstaging ${unsafe.length} binary data file(s) matching .duckdb/.parquet/.pkl/.pt — ` +
+    `automated commits never intentionally touch these (INT-2430): ${unsafe.join(', ')}`,
+  );
+  for (const file of unsafe) {
+    await git(worktreePath, 'reset', 'HEAD', '--', file).catch((e) =>
+      console.warn(`[Worktree] Failed to unstage ${file}:`, e),
+    );
+  }
 }
 
 /**
@@ -486,18 +546,25 @@ export async function commitAndCreatePR(
 
   if (status.trim()) {
     await git(worktreePath, 'add', '-A');
-    const commitMsg = [
-      `feat(${issueIdentifier}): ${title.slice(0, 72)}`,
-    ].join('\n');
+    await guardUnsafeBinaryStaging(worktreePath); // INT-2430
 
-    // Validate conventional commit format (warning only)
-    const commitCheck = runConventionalCommitGuard(commitMsg);
-    if (!commitCheck.passed) {
-      console.warn(`[Worktree] Commit format warning: ${commitCheck.issues.join('; ')}`);
+    const stillStaged = await git(worktreePath, 'diff', '--cached', '--name-only');
+    if (stillStaged.trim()) {
+      const commitMsg = [
+        `feat(${issueIdentifier}): ${title.slice(0, 72)}`,
+      ].join('\n');
+
+      // Validate conventional commit format (warning only)
+      const commitCheck = runConventionalCommitGuard(commitMsg);
+      if (!commitCheck.passed) {
+        console.warn(`[Worktree] Commit format warning: ${commitCheck.issues.join('; ')}`);
+      }
+
+      await git(worktreePath, 'commit', '-m', commitMsg);
+      console.log(`[Worktree] Committed uncommitted changes (${branchName})`);
+    } else {
+      console.log(`[Worktree] Nothing left to commit after unsafe-binary-staging guard stripped all staged changes (${branchName})`);
     }
-
-    await git(worktreePath, 'commit', '-m', commitMsg);
-    console.log(`[Worktree] Committed uncommitted changes (${branchName})`);
   }
 
   // Check if there are any commits ahead of the base ref (including worker-made
