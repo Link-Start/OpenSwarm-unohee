@@ -1,0 +1,12 @@
+# Copy this file to .openswarm/verify.yaml in a managed repository.
+version: 1
+commands:
+  - name: typecheck
+    run: npm run typecheck
+    kind: typecheck
+    timeoutMs: 300000
+  - name: unit tests
+    run: npm test
+    kind: test
+    timeoutMs: 600000
+    cwd: packages/api
