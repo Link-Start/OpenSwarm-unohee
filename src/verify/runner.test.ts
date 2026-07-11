@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -51,6 +51,22 @@ describe('runVerify', () => {
     expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'pass', newFailure: true });
     expect(evidence.rawOutputTail).toContain('[head]\nbroken');
     expect(git('worktree', 'list', '--porcelain')).not.toContain('openswarm-verify-base-');
+  });
+
+  it('reuses head-local executable dependencies in the detached base worktree', async () => {
+    const bin = join(repo, 'node_modules', '.bin');
+    await mkdir(bin, { recursive: true });
+    const executable = join(bin, 'verify-fixture');
+    await writeFile(executable, '#!/bin/sh\nif [ -f broken ]; then exit 1; fi\n', 'utf8');
+    await chmod(executable, 0o755);
+    await writeFile(join(repo, 'broken'), 'yes\n', 'utf8');
+
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('PATH="$PWD/node_modules/.bin:$PATH" verify-fixture')],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'pass', newFailure: true });
   });
 
   it('keeps a failure that also exists at base non-blocking', async () => {

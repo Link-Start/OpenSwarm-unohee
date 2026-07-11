@@ -171,7 +171,7 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     const total = test.testsPassed + test.testsFailed;
     const passRate = total > 0 ? ((test.testsPassed / total) * 100).toFixed(1) : '0';
 
-    let testValue = `✅ Passed: ${test.testsPassed}/${total} (${passRate}%)`;
+    let testValue = `✅ Passed: ${test.testsPassed}/${total} (${passRate}%)${test.deterministic ? ' · deterministic' : ''}`;
 
     if (test.coverage !== undefined) {
       testValue += `\n📊 Coverage: ${test.coverage.toFixed(1)}%`;

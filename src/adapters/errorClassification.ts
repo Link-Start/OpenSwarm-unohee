@@ -38,6 +38,7 @@ const INFRA_ERROR_PATTERNS = [
   'enomem', // out of memory — same class: host resource exhaustion, not a bad edit
   'git-tracker:', // git snapshot/diff failed mid-run — infra, not a task verdict (colon-anchored to avoid prose) (INT-2521)
   'reviewer-stage:', // reviewer ran but its output couldn't be parsed into a verdict — infra, not a quality reject (INT-2521)
+  'verify-runner:', // deterministic verifier could not execute; not a quality failure (INT-2662)
   'fetch failed', // undici: the real code hides in error.cause.code (checked below)
   'terminated', // undici mid-stream socket drop
   'unauthorized',

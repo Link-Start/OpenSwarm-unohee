@@ -2,7 +2,6 @@
 // OpenSwarm - Pair Pipeline
 // Worker → Reviewer → Tester → Documenter pipeline
 // ============================================
-
 import { EventEmitter } from 'node:events';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
@@ -12,7 +11,6 @@ import type { AuditorResult } from './auditor.js';
 import type { SkillDocumenterResult } from './skillDocumenter.js';
 import type { PipelineStage, PipelineGuardsConfig, JobProfile } from '../core/types.js';
 import { type CostInfo, aggregateCosts, formatCost } from '../support/costTracker.js';
-
 import { broadcastEvent } from '../core/eventHub.js';
 import { CONFIDENCE_THRESHOLDS } from './agentPair.js';
 import * as agentPair from './agentPair.js';
@@ -51,13 +49,13 @@ import { StuckDetector, createStuckDetector } from '../support/stuckDetector.js'
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
 import { resolveAdapterDefaultModel } from './stageModelResolver.js';
+import { runDeterministicTester } from './deterministicTester.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
 import {
   isTesterCodeFile,
   missingWorkerValidationIssues,
   testerWouldRunForWorkerResult,
 } from './workerValidationEvidence.js';
-
 export { PipelineCancelledError };
 export type {
   PipelineConfig,
@@ -67,13 +65,10 @@ export type {
   PipelineRunMetadata,
   StageResult,
 } from './pairPipelineTypes.js';
-
 export { buildTaskPrefix } from './pipelineTaskPrefix.js';
 export { stageTimeoutMs } from './stageTimeouts.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
-
 // Pair Pipeline
-
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
   private stuckDetector: StuckDetector;
@@ -82,7 +77,6 @@ export class PairPipeline extends EventEmitter {
   private abortSignal?: AbortSignal;
   /** Cache of adapter default models (heavy: OAuth + live catalog) keyed by adapter name. (INT-2393) */
   private defaultModelCache = new Map<string, Promise<string | undefined>>();
-
   /** Throw if this run has been cancelled. Called at iteration/stage boundaries. */
   private throwIfAborted(): void {
     if (this.abortSignal?.aborted) throw new PipelineCancelledError();
@@ -387,7 +381,6 @@ export class PairPipeline extends EventEmitter {
   private hasStage(stage: PipelineStage): boolean {
     return this.config.stages.includes(stage);
   }
-
   /** Post-success non-blocking stage: its failure (incl. rate-limit/infra) must
    *  NEVER revert the approved task; only cancellation propagates. (INT-2521) */
   private async runPostSuccessStage(stage: PipelineStage, context: PipelineContext, stages: StageResult[]): Promise<void> {
@@ -396,6 +389,22 @@ export class PairPipeline extends EventEmitter {
       if (err instanceof PipelineCancelledError || this.abortSignal?.aborted) throw err;
       console.warn(`[${context.taskPrefix}] ${stage} skipped (non-blocking failure): ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  private async runTester(context: PipelineContext): Promise<TesterResult> {
+    if (!context.workerResult) throw new Error('Worker result required for tester');
+    const deterministic = await runDeterministicTester(context.projectPath);
+    if (deterministic) return deterministic;
+    return await testerAgent.runTester({
+      taskTitle: context.task.title,
+      taskDescription: context.task.description || '',
+      workerResult: context.workerResult,
+      projectPath: context.projectPath,
+      timeoutMs: stageTimeoutMs('tester', this.config.roles?.tester?.timeoutMs),
+      model: this.config.roles?.tester?.model,
+      maxTurns: this.config.roles?.tester?.maxTurns,
+      adapterName: this.config.roles?.tester?.adapter,
+    });
   }
 
   /**
@@ -604,25 +613,13 @@ export class PairPipeline extends EventEmitter {
           break;
 
         case 'tester':
-          if (!context.workerResult) {
-            throw new Error('Worker result required for tester');
-          }
-          result = await testerAgent.runTester({
-            taskTitle: context.task.title,
-            taskDescription: context.task.description || '',
-            workerResult: context.workerResult,
-            projectPath: context.projectPath,
-            timeoutMs: stageTimeoutMs('tester', this.config.roles?.tester?.timeoutMs),
-            model: this.config.roles?.tester?.model,
-            maxTurns: this.config.roles?.tester?.maxTurns,
-            adapterName: this.config.roles?.tester?.adapter,
-          });
+          result = await this.runTester(context);
           context.testerResult = result as TesterResult;
 
           // Verbose: emit tester details
           if (this.config.verbose) {
             const tr = result as TesterResult;
-            this.emit('log', { line: `[verbose] Tests passed: ${tr.testsPassed}, failed: ${tr.testsFailed}${tr.coverage != null ? `, coverage: ${tr.coverage}%` : ''}` });
+            this.emit('log', { line: `[verbose] Tests passed: ${tr.testsPassed}, failed: ${tr.testsFailed}${tr.coverage != null ? `, coverage: ${tr.coverage}%` : ''}${tr.deterministic ? ' (deterministic)' : ''}` });
           }
           break;
 
@@ -1453,6 +1450,7 @@ function summarizeStageResult(
         failed: r.testsFailed,
         coverage: r.coverage,
         failedTests: Array.isArray(r.failedTests) ? r.failedTests.slice(0, MAX_FILES) : undefined,
+        deterministic: r.deterministic,
         error: r.error ? cap(r.error, FEEDBACK_CAP) : undefined,
       };
     }

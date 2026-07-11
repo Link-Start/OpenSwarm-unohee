@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import { isInfraError } from '../adapters/errorClassification.js';
 import type { VerifyCommand } from './manifest.js';
 
@@ -32,7 +32,7 @@ function appendTail(current: Buffer, chunk: Buffer): Buffer {
   return combined.length <= OUTPUT_TAIL_BYTES ? combined : combined.subarray(combined.length - OUTPUT_TAIL_BYTES);
 }
 
-async function runCommand(command: VerifyCommand, root: string): Promise<CommandResult> {
+async function runCommand(command: VerifyCommand, root: string, env: NodeJS.ProcessEnv = process.env): Promise<CommandResult> {
   const cwd = command.cwd ? resolve(root, command.cwd) : root;
   const shell = process.env.SHELL || '/bin/sh';
   return await new Promise((resolveResult) => {
@@ -42,7 +42,7 @@ async function runCommand(command: VerifyCommand, root: string): Promise<Command
     const detached = process.platform !== 'win32';
     const child = spawn(shell, ['-lc', command.run], {
       cwd,
-      env: process.env,
+      env,
       detached,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -115,7 +115,9 @@ async function runAtBase(
     root = await mkdtemp(join(tmpdir(), 'openswarm-verify-base-'));
     worktreePath = join(root, 'worktree');
     await git(projectPath, ['worktree', 'add', '--detach', worktreePath, baseCommit]);
-    return await runCommand(command, worktreePath);
+    const headBin = join(projectPath, 'node_modules', '.bin');
+    const env = { ...process.env, PATH: `${headBin}${delimiter}${process.env.PATH ?? ''}` };
+    return await runCommand(command, worktreePath, env);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { status: 'infra', output: message.slice(-OUTPUT_TAIL_BYTES) };

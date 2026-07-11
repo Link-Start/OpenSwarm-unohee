@@ -34,6 +34,8 @@ export interface TesterResult {
   suggestions?: string[];
   error?: string;
   costInfo?: CostInfo;
+  /** True when produced by the deterministic verify runner instead of an LLM. */
+  deterministic?: boolean;
 }
 
 // Prompts
