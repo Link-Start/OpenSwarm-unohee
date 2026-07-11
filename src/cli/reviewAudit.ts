@@ -630,14 +630,14 @@ export interface FixVerifyRound {
   /** Areas the fix workers actually edited. */
   edited: number;
   filesChanged: string[];
-  /** Edited areas that flipped to approve after the re-review. */
+  /** Previously flagged areas that the fresh whole-audit now approves. */
   resolved: number;
   /** Areas still flagged across the whole run after the re-review. */
   remaining: number;
 }
 
 /** Why the loop stopped. */
-export type FixVerifyStop = 'all-approved' | 'max-rounds' | 'no-progress' | 'rate-limit';
+export type FixVerifyStop = 'all-approved' | 'max-rounds' | 'no-progress' | 'rate-limit' | 'time-budget';
 
 export interface FixVerifyResult {
   rounds: FixVerifyRound[];
@@ -655,8 +655,10 @@ export interface RunFixVerifyLoopOptions {
   adapter?: AdapterName;
   /** Per-area fix-worker timeout (caller sets the long default). */
   fixTimeoutMs?: number;
-  /** Hard cap on fix → re-review rounds (default 3). */
+  /** Optional hard cap on fix → re-review rounds. Unset means run until clean or blocked. */
   maxRounds?: number;
+  /** Whole-loop wall-clock budget. Defaults to two hours. */
+  maxDurationMs?: number;
   signal?: AbortSignal;
 }
 
@@ -671,6 +673,34 @@ export interface RunFixVerifyLoopDeps {
   onReviewProgress?: (e: AuditProgress) => void;
   /** End of each round: its record. */
   onRoundEnd?: (r: FixVerifyRound) => void;
+  /** Injectable clock for deterministic wall-clock budget tests. */
+  now?: () => number;
+}
+
+class FixLoopTimeBudgetError extends Error {
+  constructor() {
+    super('fix/review loop time budget exhausted');
+    this.name = 'FixLoopTimeBudgetError';
+  }
+}
+
+/** Reject promptly when the whole-loop budget expires; the same signal aborts in-flight agents. */
+async function withinFixLoopBudget<T>(work: Promise<T>, budgetSignal: AbortSignal): Promise<T> {
+  if (budgetSignal.aborted) throw new FixLoopTimeBudgetError();
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new FixLoopTimeBudgetError());
+    budgetSignal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        budgetSignal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        budgetSignal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 /**
@@ -691,10 +721,11 @@ export function mergeReReview(base: AuditRun, reReview: AuditRun): AuditRun {
 }
 
 /**
- * Iterate fix → re-review until every area approves or the round budget runs
- * out. Each round applies the reviewer's fixes to the currently-flagged areas,
- * then re-reviews ONLY the areas actually edited (an untouched flagged area
- * keeps its prior verdict — re-reviewing it would waste a subagent). Stops early
+ * Iterate fix → re-review until every area approves or an explicit round budget
+ * runs out. Without a budget, continue until clean, no-progress, or rate-limit.
+ * Each round applies the reviewer's fixes to the currently-flagged areas,
+ * then re-reviews the whole audit surface so cross-area regressions are detected
+ * immediately. Stops early
  * when a round edits nothing (workers can't progress) or a re-review hits a
  * usage limit, so it never spins. Edits accumulate in the working tree — no
  * commit — so the user reviews the diff before committing. (INT-2443)
@@ -705,11 +736,17 @@ export async function runFixVerifyLoop(
   opts: RunFixVerifyLoopOptions,
   deps: RunFixVerifyLoopDeps = {},
 ): Promise<FixVerifyResult> {
-  const maxRounds = opts.maxRounds && opts.maxRounds > 0 ? opts.maxRounds : 3;
-  const reviewOpts: RunMaxReviewOptions = { concurrency: opts.concurrency, adapter: opts.adapter, signal: opts.signal };
-  const fixOpts: RunAreaFixesOptions = { concurrency: opts.concurrency, adapter: opts.adapter, timeoutMs: opts.fixTimeoutMs, signal: opts.signal };
+  const maxRounds = opts.maxRounds && opts.maxRounds > 0 ? opts.maxRounds : Number.POSITIVE_INFINITY;
+  const maxDurationMs = opts.maxDurationMs && opts.maxDurationMs > 0 ? opts.maxDurationMs : 2 * 60 * 60 * 1000;
+  const now = deps.now ?? Date.now;
+  const startedAt = now();
+  const budgetSignal = AbortSignal.timeout(maxDurationMs);
+  const phaseSignal = opts.signal ? AbortSignal.any([opts.signal, budgetSignal]) : budgetSignal;
+  const reviewOpts: RunMaxReviewOptions = { concurrency: opts.concurrency, adapter: opts.adapter, signal: phaseSignal };
+  const fixOpts: RunAreaFixesOptions = { concurrency: opts.concurrency, adapter: opts.adapter, timeoutMs: opts.fixTimeoutMs, signal: phaseSignal };
   const reviewDeps: RunMaxReviewDeps = { review: deps.review, onProgress: deps.onReviewProgress };
   const fixDeps: RunAreaFixesDeps = { fix: deps.fix, onProgress: deps.onFixProgress };
+  const allAreas = initial.results.map((result) => result.area);
 
   let run = initial;
   const rounds: FixVerifyRound[] = [];
@@ -728,9 +765,22 @@ export async function runFixVerifyLoop(
       stopReason = unresolved(run) === 0 ? 'all-approved' : 'no-progress';
       break;
     }
+    if (now() - startedAt >= maxDurationMs) {
+      stopReason = 'time-budget';
+      break;
+    }
     deps.onRoundStart?.(round, targets.length);
 
-    const fixes = await runAreaFixes(run, cwd, fixOpts, fixDeps);
+    let fixes: FixAreaResult[];
+    try {
+      fixes = await withinFixLoopBudget(runAreaFixes(run, cwd, fixOpts, fixDeps), budgetSignal);
+    } catch (error) {
+      if (error instanceof FixLoopTimeBudgetError) {
+        stopReason = 'time-budget';
+        break;
+      }
+      throw error;
+    }
     const edited = fixes.filter((f) => f.applied && f.filesChanged.length);
     for (const f of edited) for (const p of f.filesChanged) allFiles.add(p);
 
@@ -742,19 +792,30 @@ export async function runFixVerifyLoop(
       break;
     }
 
-    // Re-review only the edited areas; merge their fresh verdicts back in.
-    const editedLabels = new Set(edited.map((f) => f.label));
-    const editedAreas = targets.filter((t) => editedLabels.has(t.area.label)).map((t) => t.area);
-    const reReview = await runMaxReview(editedAreas, cwd, reviewOpts, reviewDeps);
+    // Re-review the entire surface. Fixes are scoped by directory but can still
+    // affect callers and shared contracts elsewhere, so a targeted review cannot
+    // prove that the repository is fully clean.
+    let reReview: AuditRun;
+    try {
+      reReview = await withinFixLoopBudget(runMaxReview(allAreas, cwd, reviewOpts, reviewDeps), budgetSignal);
+    } catch (error) {
+      if (error instanceof FixLoopTimeBudgetError) {
+        stopReason = 'time-budget';
+        break;
+      }
+      throw error;
+    }
     run = mergeReReview(run, reReview);
 
     const remaining = unresolved(run);
+    const freshByLabel = new Map(reReview.results.map((result) => [result.area.label, result]));
+
     const rec: FixVerifyRound = {
       round,
       flagged: targets.length,
       edited: edited.length,
       filesChanged: edited.flatMap((f) => f.filesChanged),
-      resolved: reReview.results.filter((r) => r.review?.decision === 'approve').length,
+      resolved: targets.filter((target) => freshByLabel.get(target.area.label)?.review?.decision === 'approve').length,
       remaining,
     };
     rounds.push(rec);

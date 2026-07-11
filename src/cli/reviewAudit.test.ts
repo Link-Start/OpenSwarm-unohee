@@ -463,12 +463,15 @@ describe('runFixVerifyLoop (INT-2443)', () => {
   });
 
   it('loops fix → re-review and converges once the re-review approves', async () => {
-    let reviews = 0;
+    let bReviews = 0;
     const fixed: string[] = [];
     const result = await runFixVerifyLoop(initial(), '/repo', { concurrency: 2, maxRounds: 3 }, {
       fix: async (a) => { fixed.push(a.label); return { success: true, filesChanged: a.files }; },
       // round 1 re-review still revises, round 2 approves
-      review: async () => ({ decision: ++reviews >= 2 ? 'approve' : 'revise', feedback: '' }),
+      review: async (a) => ({
+        decision: a.label === 'src/b' && ++bReviews < 2 ? 'revise' : 'approve',
+        feedback: '',
+      }),
     });
     expect(result.rounds).toHaveLength(2);
     expect(result.resolved).toBe(true);
@@ -477,15 +480,88 @@ describe('runFixVerifyLoop (INT-2443)', () => {
     expect(fixed).toEqual(['src/b', 'src/b']);            // fixed twice, never touched src/a
   });
 
+  it('keeps fixing past three rounds by default until every area approves', async () => {
+    let bReviews = 0;
+    const result = await runFixVerifyLoop(initial(), '/repo', { concurrency: 1 }, {
+      fix: async (a) => ({ success: true, filesChanged: a.files }),
+      review: async (a) => ({
+        decision: a.label === 'src/b' && ++bReviews < 5 ? 'revise' : 'approve',
+        feedback: '',
+      }),
+    });
+    expect(result.rounds).toHaveLength(5);
+    expect(result.resolved).toBe(true);
+    expect(result.stopReason).toBe('all-approved');
+  });
+
+  it('re-reviews the whole audit each round and fixes findings discovered in a previously approved area', async () => {
+    const fixed: string[] = [];
+    let confirmationFoundRegression = false;
+    const result = await runFixVerifyLoop(initial(), '/repo', { concurrency: 1 }, {
+      fix: async (a) => {
+        fixed.push(a.label);
+        return { success: true, filesChanged: a.files };
+      },
+      review: async (a) => {
+        if (a.label === 'src/a' && !confirmationFoundRegression) {
+          confirmationFoundRegression = true;
+          return { decision: 'revise', feedback: '', issues: ['cross-area regression'] };
+        }
+        return { decision: 'approve', feedback: '' };
+      },
+    });
+    expect(fixed).toEqual(['src/b', 'src/a']);
+    expect(result.rounds).toHaveLength(2);
+    expect(result.resolved).toBe(true);
+    expect(result.stopReason).toBe('all-approved');
+  });
+
   it('stops at the round budget and reports the still-flagged area', async () => {
     const result = await runFixVerifyLoop(initial(), '/repo', { concurrency: 1, maxRounds: 2 }, {
       fix: async (a) => ({ success: true, filesChanged: a.files }),
-      review: async () => ({ decision: 'reject', feedback: '' }), // never clears
+      review: async (a) => ({ decision: a.label === 'src/b' ? 'reject' : 'approve', feedback: '' }), // never clears b
     });
     expect(result.rounds).toHaveLength(2);
     expect(result.stopReason).toBe('max-rounds');
     expect(result.resolved).toBe(false);
     expect(fixTargets(result.finalRun).map((t) => t.area.label)).toEqual(['src/b']);
+  });
+
+  it('fails unresolved when the whole-loop wall-clock budget is exhausted', async () => {
+    let now = 0;
+    const result = await runFixVerifyLoop(initial(), '/repo', { concurrency: 1, maxDurationMs: 100 }, {
+      now: () => now,
+      fix: async (a) => {
+        now += 100;
+        return { success: true, filesChanged: a.files };
+      },
+      review: async (a) => ({ decision: a.label === 'src/b' ? 'revise' : 'approve', feedback: '' }),
+    });
+    expect(result.rounds).toHaveLength(1);
+    expect(result.resolved).toBe(false);
+    expect(result.stopReason).toBe('time-budget');
+  });
+
+  it('interrupts an in-flight fix phase when the whole-loop budget expires', async () => {
+    const result = await runFixVerifyLoop(initial(), '/repo', { concurrency: 1, maxDurationMs: 10 }, {
+      fix: async () => await new Promise<{ success: boolean; filesChanged: string[] }>(() => {}),
+    });
+    expect(result.rounds).toHaveLength(0);
+    expect(result.resolved).toBe(false);
+    expect(result.stopReason).toBe('time-budget');
+  });
+
+  it('reports all-approved before consulting an expired time budget', async () => {
+    const clean: AuditRun = {
+      results: [{ area: area('src/a'), review: { decision: 'approve', feedback: '' } }],
+      summary: aggregateAuditResults([]),
+    };
+    const result = await runFixVerifyLoop(clean, '/repo', { concurrency: 1, maxDurationMs: 1 }, {
+      now: () => 10_000,
+    });
+    expect(result.rounds).toHaveLength(0);
+    expect(result.resolved).toBe(true);
+    expect(result.stopReason).toBe('all-approved');
   });
 
   it('bails out with no-progress when a round edits nothing, and never re-reviews', async () => {
