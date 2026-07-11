@@ -297,7 +297,40 @@ export interface PipelineHistoryEntry {
   cost?: { costUsd: number; inputTokens: number; outputTokens: number };
   prUrl?: string;
   reviewerFeedback?: string; // Reviewer rejection reason (for debugging)
+  failureCause?: FailureCause;
   completedAt: string; // ISO-8601
+}
+
+export type FailureCause = 'reviewer-reject' | 'infra' | 'rate-limit' | 'no-changes' | 'gate-fail' | 'timeout' | 'cancelled';
+
+export interface FailureCauseSignals {
+  success: boolean;
+  finalStatus: string;
+  failureSignal?: 'gate-fail' | 'timeout';
+  workerFilesChanged?: number;
+  reviewerDecision?: string;
+}
+
+/** Classify only explicit result fields; never infer from reviewer prose. */
+export function classifyFailureCause(signals: FailureCauseSignals): FailureCause | undefined {
+  if (signals.success) return undefined;
+  if (signals.finalStatus === 'cancelled') return 'cancelled';
+  if (signals.finalStatus === 'rate_limited') return 'rate-limit';
+  if (signals.failureSignal === 'timeout') return 'timeout';
+  if (signals.finalStatus === 'infra_error') return 'infra';
+  if (signals.workerFilesChanged === 0) return 'no-changes';
+  if (signals.failureSignal === 'gate-fail') return 'gate-fail';
+  if (signals.finalStatus === 'rejected' || signals.reviewerDecision === 'reject' || signals.reviewerDecision === 'revise') return 'reviewer-reject';
+  return undefined;
+}
+
+export function aggregateFailureCauses(entries: PipelineHistoryEntry[]): Record<FailureCause, number> {
+  const counts: Record<FailureCause, number> = {
+    'reviewer-reject': 0, infra: 0, 'rate-limit': 0, 'no-changes': 0,
+    'gate-fail': 0, timeout: 0, cancelled: 0,
+  };
+  for (const entry of entries) if (entry.failureCause) counts[entry.failureCause]++;
+  return counts;
 }
 
 // Rejection State (track reviewer rejections per issue)

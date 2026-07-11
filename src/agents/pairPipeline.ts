@@ -47,7 +47,7 @@ import * as auditorAgent from './auditor.js';
 import * as skillDocumenterAgent from './skillDocumenter.js';
 import { StuckDetector, createStuckDetector } from '../support/stuckDetector.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
-import { isInfraError } from '../adapters/errorClassification.js';
+import { isInfraError, isTimeoutError } from '../adapters/errorClassification.js';
 import { resolveAdapterDefaultModel } from './stageModelResolver.js';
 import { runTesterWithVerification } from './deterministicTester.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
@@ -245,6 +245,7 @@ export class PairPipeline extends EventEmitter {
         sessionId: session.id,
         stages,
         finalStatus: cancelled ? 'cancelled' : rateLimited ? 'rate_limited' : infra ? 'infra_error' : 'failed',
+        failureSignal: isTimeoutError(error) ? 'timeout' : undefined,
         rateLimitResetsAt: rateLimited && (error as RateLimitError).resetsAt
           ? (error as RateLimitError).resetsAt! * 1000
           : undefined,
@@ -264,9 +265,7 @@ export class PairPipeline extends EventEmitter {
     }
   }
 
-  // ============================================
   // Stage Execution
-  // ============================================
 
   /**
    * Worker에 주입할 코드 컨텍스트 수집
@@ -1284,6 +1283,7 @@ export class PairPipeline extends EventEmitter {
       sessionId: context.session.id,
       stages,
       finalStatus,
+      failureSignal: context.guardsResult?.results.some(r => r.blocking && !r.passed) || context.testerResult?.success === false ? 'gate-fail' : undefined,
       totalDuration: Date.now() - startTime,
       iterations: context.currentIteration,
       workerResult: context.workerResult,

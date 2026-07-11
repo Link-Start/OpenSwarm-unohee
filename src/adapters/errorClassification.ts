@@ -99,6 +99,13 @@ export function isInfraError(error: unknown): boolean {
   return INFRA_ERROR_PATTERNS.some((p) => msg.includes(p)) || INFRA_ERROR_REGEXES.some((r) => r.test(msg));
 }
 
+/** Distinguish wall-clock exhaustion from other infrastructure failures. */
+export function isTimeoutError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === 'TimeoutError') return true;
+  const msg = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase();
+  return msg.includes('timed out') || msg.includes('timeout after');
+}
+
 /**
  * Diagnostic hint for the opaque failure where codex CLI dies because an MCP server
  * declared in ~/.codex/config.toml is OAuth-protected. A direct `url=` MCP server that

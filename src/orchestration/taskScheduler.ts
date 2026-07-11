@@ -394,7 +394,12 @@ export class TaskScheduler extends EventEmitter {
 
     console.error(`[Scheduler] Task error: ${running.task.title}`, error.message);
     if (this.listenerCount('error') > 0) {
-      this.emit('error', { task: running.task, error });
+      this.emit('error', {
+        task: running.task,
+        error,
+        startedAt: running.startedAt,
+        projectPath: running.projectPath,
+      });
     }
     this.emit('slotFreed');
   }

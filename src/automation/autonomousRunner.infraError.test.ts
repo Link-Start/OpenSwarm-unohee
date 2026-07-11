@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -84,6 +84,7 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
   }, 30000);
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllEnvs();
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -98,6 +99,9 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
 
     expect(source.logStuck).not.toHaveBeenCalled();
     expect(source.updateState).not.toHaveBeenCalled(); // no failure-state sync
+    const history = JSON.parse(readFileSync(join(tempDir, 'runner-pipeline-history.json'), 'utf8'));
+    expect(history).toHaveLength(6);
+    expect(history.every((entry: { failureCause?: string }) => entry.failureCause === 'infra')).toBe(true);
   });
 
   it('still marks STUCK after MAX_RETRY_COUNT genuine failures (control)', async () => {
@@ -109,5 +113,31 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
     await runN(scheduler, 'failed', 4);
 
     expect(source.logStuck).toHaveBeenCalled();
+  });
+
+  it('records rate limits before the retry-hold early return', async () => {
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg());
+    const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
+
+    await runN(scheduler, 'rate_limited', 1);
+
+    const history = JSON.parse(readFileSync(join(tempDir, 'runner-pipeline-history.json'), 'utf8'));
+    expect(history).toHaveLength(1);
+    expect(history[0].failureCause).toBe('rate-limit');
+  });
+
+  it('records the scheduler hard watchdog as a timeout', async () => {
+    vi.useFakeTimers();
+    const runner = new AutonomousRunner(cfg());
+    const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
+
+    scheduler.startTask(task(), '/repo', async () => await new Promise<PipelineResult>(() => {}));
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+
+    const history = JSON.parse(readFileSync(join(tempDir, 'runner-pipeline-history.json'), 'utf8'));
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ failureCause: 'timeout', finalStatus: 'infra_error' });
   });
 });

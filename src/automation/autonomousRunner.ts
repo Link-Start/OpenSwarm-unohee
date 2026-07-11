@@ -7,6 +7,8 @@ import {
   buildProjectsInfo,
   appendPipelineHistory,
   getPipelineHistory,
+  aggregateFailureCauses,
+  classifyFailureCause,
   incrementRejection,
   clearRejection,
   getRejectionCount,
@@ -60,6 +62,7 @@ import { resolveAdapterDefaultModel } from '../agents/stageModelResolver.js';
 import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 import type { AdapterName } from '../adapters/types.js';
 import { mapModelForProvider as mapModelForAdapter } from '../adapters/modelCompat.js';
+import { isTimeoutError } from '../adapters/errorClassification.js';
 import {
   applyBacklogGrooming,
   filterGroomableTasks,
@@ -374,6 +377,7 @@ export class AutonomousRunner {
 
     this.scheduler.on('failed', async ({ task, result }) => {
       const taskCtx = this.formatTaskContext(task);
+      this.recordPipelineHistory(task, result);
 
       // Rate-limited: pause execution until the quota resets. Do NOT count it as a
       // task failure, run the rejection/block path, or post a Linear comment —
@@ -414,7 +418,6 @@ export class AutonomousRunner {
 
       console.log(`[Scheduler] Task failed: ${taskCtx} ${task.title}`);
       broadcastEvent({ type: 'task:completed', data: { taskId: task.id, success: false, duration: result.totalDuration } });
-      this.recordPipelineHistory(task, result);
       await reportToDiscord(formatPipelineResultEmbed(result));
 
       // Structural infeasibility (⑦, INT-2521): the failure text says the DoD can't
@@ -595,9 +598,16 @@ export class AutonomousRunner {
       this.scheduleNextHeartbeat();
     });
 
-    this.scheduler.on('error', async ({ task, error }) => {
+    this.scheduler.on('error', async ({ task, error, startedAt, projectPath }) => {
       const taskCtx = this.formatTaskContext(task);
       console.error(`[Scheduler] Task error: ${taskCtx} ${task.title}`, error);
+      const timeout = isTimeoutError(error);
+      this.recordPipelineHistory(task, {
+        success: false, sessionId: `scheduler-error-${task.id}-${Date.now()}`, stages: [],
+        finalStatus: timeout ? 'infra_error' : 'failed', failureSignal: timeout ? 'timeout' : undefined,
+        totalDuration: Math.max(0, Date.now() - startedAt), iterations: 0,
+        taskContext: { issueIdentifier: task.issueIdentifier || task.issueId, projectName: task.linearProject?.name, projectPath, taskTitle: task.title },
+      });
       await reportToDiscord(t('runner.pipelineError', { title: `${taskCtx} ${task.title}`, error: error.message }));
     });
 
@@ -1741,8 +1751,14 @@ export class AutonomousRunner {
   getQueuedTasks() { return this.scheduler.getQueuedTasks(); }
   getRunningTasks() { return this.scheduler.getRunningTasks(); }
   getPipelineHistory(limit = 50) { return getPipelineHistory(limit); }
+  getFailureCauseSummary(limit = 50) { return aggregateFailureCauses(getPipelineHistory(limit)); }
 
   private recordPipelineHistory(task: TaskItem, result: PipelineResult): void {
+    const failureCause = classifyFailureCause({
+      success: result.success, finalStatus: result.finalStatus, failureSignal: result.failureSignal,
+      workerFilesChanged: result.workerResult?.filesChanged?.length,
+      reviewerDecision: result.reviewResult?.decision,
+    });
     appendPipelineHistory({
       sessionId: result.sessionId, issueIdentifier: task.issueIdentifier || task.issueId,
       issueId: task.issueId, taskTitle: task.title, projectName: task.linearProject?.name,
@@ -1753,6 +1769,7 @@ export class AutonomousRunner {
       cost: result.totalCost ? { costUsd: result.totalCost.costUsd,
         inputTokens: result.totalCost.inputTokens, outputTokens: result.totalCost.outputTokens } : undefined,
       prUrl: result.prUrl, reviewerFeedback: result.reviewResult?.feedback,
+      failureCause,
       completedAt: new Date().toISOString(),
     });
   }

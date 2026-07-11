@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { isInfraError, codexMcpAuthHint } from './errorClassification.js';
+import { isInfraError, isTimeoutError, codexMcpAuthHint } from './errorClassification.js';
+
+describe('isTimeoutError (INT-2659)', () => {
+  it('separates wall-clock exhaustion from other infrastructure failures', () => {
+    expect(isTimeoutError(new Error('Task timed out after 3600000ms'))).toBe(true);
+    expect(isTimeoutError(new DOMException('expired', 'TimeoutError'))).toBe(true);
+    expect(isTimeoutError(new Error('spawn codex ENOENT'))).toBe(false);
+  });
+});
 
 describe('isInfraError (INT-2010)', () => {
   it('flags CLI non-zero exit as infra (the production STUCK driver)', () => {

@@ -491,6 +491,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           turboMode: stats?.turboMode ?? false,
           turboExpiresAt: stats?.turboExpiresAt ?? null,
           dailyPace: stats?.dailyPace ?? null,
+          failureCauses: { window: 50, counts: runnerRef?.getFailureCauseSummary(50) ?? {} },
         }));
 
       // ---- Tasks ----

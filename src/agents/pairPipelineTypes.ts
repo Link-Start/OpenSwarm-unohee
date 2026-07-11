@@ -67,6 +67,7 @@ export interface PipelineResult {
   sessionId: string;
   stages: StageResult[];
   finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled' | 'decomposed' | 'rate_limited' | 'infra_error';
+  failureSignal?: 'gate-fail' | 'timeout';
   rateLimitResetsAt?: number;
   totalDuration: number;
   iterations: number;
