@@ -318,13 +318,14 @@ program
   .option('--no-linear', 'For --max: skip creating the default Linear master audit issue')
   .option('--fallback <adapter>', 'For --max: retry usage-limited areas on this adapter (default: claude for codex)')
   .option('--no-fallback', 'For --max: disable the automatic usage-limit fallback')
-  .option('--fix', 'For --max: apply reviewer fixes and re-review until every area approves (working tree only, no commit)')
+  .option('--fix', 'For --max: apply reviewer fixes and re-review until every area approves, in an isolated audit worktree that ships as a PR')
+  .option('--in-place', 'For --max --fix: edit the current working tree instead of an isolated worktree (no branch, no PR)')
   .option('--fix-rounds <n>', 'For --max --fix: optional round cap (default: until clean, with a two-hour safety budget)', parsePositiveIntegerOption)
   .option('--no-learn', 'For --max: do not record the audit findings into the repo knowledge memory')
   .action(async (opts: {
     path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean;
     max?: boolean; concurrency?: number; maxFilesPerArea?: number; yes?: boolean; dryRun?: boolean;
-    out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; fixRounds?: number; learn?: boolean;
+    out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; inPlace?: boolean; fixRounds?: number; learn?: boolean;
   }) => {
     try {
       if (opts.max) {
@@ -345,6 +346,7 @@ program
           fallbackAdapter: typeof opts.fallback === 'string' ? opts.fallback : undefined,
           noFallback: opts.fallback === false,
           fix: opts.fix,
+          inPlace: opts.inPlace,
           fixRounds: opts.fixRounds,
           learn: opts.learn,
         });

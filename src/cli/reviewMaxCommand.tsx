@@ -33,6 +33,7 @@ import { resolveIssueFromBranch, ensureTaskSource, ensureProjectMapping } from '
 import { synthesizeAuditIssues } from './auditPM.js';
 import { c, status } from '../support/colors.js';
 import type { AdapterName } from '../adapters/types.js';
+import type { WorktreeInfo } from '../support/worktreeManager.js';
 import { loadConfig } from '../core/config.js';
 import type { VerifyConfig } from '../core/types.js';
 import { loadTrustedVerifyPlan, runDeterministicTester } from '../agents/deterministicTester.js';
@@ -79,8 +80,10 @@ export interface ReviewMaxOptions {
   fallbackAdapter?: string;
   /** Disable the automatic usage-limit fallback. (INT-2192) */
   noFallback?: boolean;
-  /** Apply the reviewer's fixes to each non-approve area (working tree only). (INT-2249) */
+  /** Apply the reviewer's fixes to each non-approve area. (INT-2249) */
   fix?: boolean;
+  /** For --fix: edit the current working tree instead of an isolated audit worktree. (INT-2905) */
+  inPlace?: boolean;
   /** For --fix: optional fix → re-review round cap. Unset means continue until clean or blocked. */
   fixRounds?: number;
   /** Record the audit findings into repo knowledge (default true; --no-learn opts out). (INT-2268) */
@@ -131,6 +134,115 @@ async function confirmCost(areas: number, files: number, concurrency: number): P
   );
   rl.close();
   return /^y(es)?$/i.test(answer.trim());
+}
+
+// Isolated audit worktree (INT-2905)
+//
+// `--fix` used to accumulate its edits in the caller's working tree, so an audit
+// run mixed itself into whatever a daemon worker (or the user) was doing on that
+// branch. It now forks the caller's HEAD into `<repo>/worktree/audit-<ts>` on a
+// `swarm/audit-<ts>` branch, works there, and ships the result as a PR.
+
+/** The Linear issue the audit PR points at. */
+export interface AuditIssueParent {
+  /** Internal issue id (or the `--issues <id>` value) — for commenting. */
+  id?: string;
+  /** Human identifier (INT-123) — for the PR body reference. */
+  identifier?: string;
+  /** True when this run created the issue, so its PR may close it. */
+  created?: boolean;
+}
+
+export interface AuditWorktree {
+  info: WorktreeInfo;
+  /** Commit the worktree forked from — commits past it are the audit's own. */
+  baseSha: string;
+  /** Branch the audit forked from (empty when HEAD was detached) — the PR base. */
+  forkedFromBranch: string;
+}
+
+function gitOut(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+}
+
+/** Fork the caller's HEAD into a dedicated audit worktree. Throws (with the
+ *  `--in-place` escape hatch named) rather than silently editing their branch. */
+export async function createAuditWorktree(cwd: string, ts: string): Promise<AuditWorktree> {
+  const { createWorktree } = await import('../support/worktreeManager.js');
+  try {
+    const baseSha = gitOut(cwd, 'rev-parse', 'HEAD');
+    const head = gitOut(cwd, 'rev-parse', '--abbrev-ref', 'HEAD');
+    const id = `audit-${ts}`;
+    const info = await createWorktree(cwd, id, `swarm/${id}`, baseSha);
+    return { info, baseSha, forkedFromBranch: head === 'HEAD' ? '' : head };
+  } catch (e) {
+    throw new Error(
+      `Could not create the audit worktree: ${e instanceof Error ? e.message : String(e)}\n` +
+        'Fix the repository state, or pass --in-place to fix the current working tree directly.',
+    );
+  }
+}
+
+/**
+ * Ship the audit worktree: commit the fixes, push the branch, open a PR, and
+ * note the PR on the Linear audit issue. A run that changed nothing leaves no
+ * branch behind — the worktree is removed. Never throws: the audit report and
+ * the Linear issues are already persisted, so a git/gh failure must not turn a
+ * completed audit into a crash (the worktree is kept for manual recovery).
+ */
+export async function shipAuditWorktree(
+  audit: AuditWorktree,
+  summary: AuditSummary,
+  ts: string,
+  linear: { issueId?: string; identifier?: string; closes: boolean },
+): Promise<string | null> {
+  const { commitAndCreateAuditPR, removeWorktree } = await import('../support/worktreeManager.js');
+  const ref = linear.identifier ? `${linear.closes ? 'Closes' : 'Refs'} ${linear.identifier}` : '';
+  const title = `fix(audit): codebase audit ${ts.slice(0, 10)} — review --max --fix`;
+  const body = [
+    '## Summary',
+    `Automated fixes from \`openswarm review --max --fix\` (${summary.areas.length} area(s), ` +
+      `${summary.recommendedActions.length} follow-up(s) recorded).`,
+    '',
+    'Every change here was produced by fix workers and re-reviewed by the audit loop — read the diff before merging.',
+    ...(ref ? ['', '## Linear', ref] : []),
+    '',
+    '---',
+    '🤖 Generated with [OpenSwarm](https://github.com/Intrect-io/OpenSwarm)',
+  ].join('\n');
+
+  let url: string | null = null;
+  try {
+    url = await commitAndCreateAuditPR(audit.info, {
+      title,
+      body,
+      commitMessage: `fix(audit): apply review --max findings (${ts.slice(0, 10)})`,
+      forkedFromBranch: audit.forkedFromBranch,
+      baseSha: audit.baseSha,
+    });
+  } catch (e) {
+    console.warn(status.err(`Could not open the audit PR: ${e instanceof Error ? e.message : String(e)}`));
+    console.warn(`  Fixes are committed on ${c.cyan(audit.info.branchName)} at ${audit.info.worktreePath}`);
+    return null;
+  }
+
+  if (!url) {
+    console.log(status.info('--fix changed nothing — discarding the audit worktree.'));
+    await removeWorktree(audit.info).catch(() => {});
+    return null;
+  }
+
+  console.log(`\n${status.ok('Audit PR')} ${c.cyan(url)}  ${c.dim(`(branch ${audit.info.branchName})`)}`);
+  console.log(c.dim(`Worktree kept at ${audit.info.worktreePath} — remove it after the PR merges.`));
+  if (linear.issueId) {
+    try {
+      const source = await ensureTaskSource();
+      await source?.addComment(linear.issueId, `Audit fixes opened as a PR: ${url}\n\nBranch: \`${audit.info.branchName}\``);
+    } catch (e) {
+      console.warn(`Could not comment the PR link on Linear: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return url;
 }
 
 /** File each area's recommendedActions as Linear follow-ups, one call per area (avoids the 10-action cap). */
@@ -210,7 +322,7 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
   }
   // Split down to fill the reviewer pool: fewer areas than `concurrency` would
   // leave subagents idle, so the fastest audit maximizes parallel spread. (INT-2249)
-  const areas: AuditArea[] = balanceAreasToConcurrency(files, concurrency, maxFilesPerArea);
+  let areas: AuditArea[] = balanceAreasToConcurrency(files, concurrency, maxFilesPerArea);
 
   if (opts.dryRun) {
     console.log(`Audit plan — ${files.length} file(s) across ${areas.length} area(s):`);
@@ -223,11 +335,43 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
     return null;
   }
 
+  // Timestamp identifies this run everywhere: worktree/branch, report file, issue.
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+
+  // `--fix` works in its own worktree forked from HEAD so the edits never land on
+  // the branch a worker (or the user) is on. Reports, repo knowledge and Linear
+  // mapping keep using the original repo path. (INT-2905)
+  let audit: AuditWorktree | null = null;
+  let workCwd = cwd;
+  if (opts.fix && !opts.inPlace) {
+    audit = await createAuditWorktree(cwd, ts);
+    workCwd = audit.info.worktreePath;
+    console.log(
+      `${status.info('Audit worktree')} ${c.cyan(audit.info.branchName)} ${c.dim(`at ${workCwd}`)}\n` +
+        c.dim('  Fixes are isolated here — the current working tree is left untouched.'),
+    );
+    // Cosmetic note only — never let a git hiccup here abort the audit.
+    const uncommitted = (() => { try { return gitOut(cwd, 'status', '--porcelain'); } catch { return ''; } })();
+    if (uncommitted) {
+      console.log(c.dim(`  Note: ${uncommitted.split('\n').length} uncommitted change(s) in ${cwd} are NOT part of this audit.`));
+    }
+    // Re-partition from the worktree so the areas match the files actually there
+    // (the caller's index may hold staged-but-uncommitted additions).
+    files = listSourceFiles(workCwd);
+    areas = balanceAreasToConcurrency(files, concurrency, maxFilesPerArea);
+    if (!areas.length) {
+      console.log('No production source files to audit at HEAD.');
+      const { removeWorktree } = await import('../support/worktreeManager.js');
+      await removeWorktree(audit.info).catch(() => {});
+      return null;
+    }
+  }
+
   // Capture deterministic commands and npm script contents before any fix worker
   // can edit them. LLM approval alone is not completion evidence: the fix must
   // also leave the repository's real checks without new failures.
   const verifyConfig = loadVerifyConfigBestEffort();
-  const trustedVerifyPlan = opts.fix ? await loadTrustedVerifyPlan(cwd, verifyConfig) : undefined;
+  const trustedVerifyPlan = opts.fix ? await loadTrustedVerifyPlan(workCwd, verifyConfig) : undefined;
 
   // Live board → stderr so the final report on stdout stays pipe-clean.
   const events = new EventEmitter();
@@ -240,7 +384,7 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
   try {
     run = await runMaxReview(
       areas,
-      cwd,
+      workCwd,
       { concurrency, adapter: opts.adapter as AdapterName | undefined },
       { onProgress: (e) => events.emit('progress', e) },
     );
@@ -257,7 +401,7 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
       console.warn(`\n${status.warn(`Codex usage limit hit — falling back to "${fallback}" for ${pending.length} remaining area(s)...`)}`);
       const fbRun = await runMaxReview(
         pending,
-        cwd,
+        workCwd,
         { concurrency, adapter: fallback },
         {
           onProgress: (e) => {
@@ -303,7 +447,7 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
       );
       const loop = await runFixVerifyLoop(
         run,
-        cwd,
+        workCwd,
         // 15 min per area: the adapter default (5 min) SIGKILLs fix workers on
         // issue-heavy areas mid-edit.
         {
@@ -317,7 +461,7 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
           verify: trustedVerifyPlan && trustedVerifyPlan.commands.length > 0
             ? async () => {
                 const result = await runDeterministicTester(
-                  cwd,
+                  workCwd,
                   verifyConfig,
                   trustedVerifyPlan.commands,
                   trustedVerifyPlan.packageJsonByDirectory,
@@ -364,14 +508,19 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
             `--fix: ${still} area(s) still flagged after ${loop.rounds.length} round(s) (${stopLabel[loop.stopReason]})`,
           );
       console.log(`\n${headline} · ${c.yellow(`${loop.filesChanged.length} file(s) touched`)}`);
-      console.log(c.dim('Changes are in the working tree — review the diff before committing.'));
+      console.log(
+        c.dim(
+          audit
+            ? `Changes are in the audit worktree (${audit.info.branchName}) — a PR follows below.`
+            : 'Changes are in the working tree — review the diff before committing.',
+        ),
+      );
     }
   }
 
   // (3.6) Persist a markdown report so the result isn't lost to the scrollback.
   //       Built here (after --fix) so it reflects the verified post-fix verdicts —
   //       and so the Linear master issue below embeds the same final state. (INT-2022 / INT-2443)
-  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const report = formatAuditReport(run.summary, basename(cwd) || cwd, ts);
   const outPath = opts.out ?? join(cwd, '.openswarm', 'audit', `audit-${ts}.md`);
   try {
@@ -386,12 +535,24 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
   //     sub-issues. `--issues <id>` overrides the parent with an existing issue;
   //     `--issues-per-area` keeps the legacy per-area fan-out; `--no-linear`
   //     skips Linear entirely (report only). (INT-2022 / INT-2225)
+  let parent: AuditIssueParent = {};
   if (opts.issuesPerArea) {
     await filePerAreaFollowups(cwd, opts.issuesPerArea, run);
   } else if (!opts.noLinear && run.summary.recommendedActions.length) {
-    await filePmSynthesizedIssues(cwd, opts, run.summary, report, ts);
+    parent = await filePmSynthesizedIssues(cwd, opts, run.summary, report, ts);
   } else if (run.summary.recommendedActions.length) {
     console.log(`\n${run.summary.recommendedActions.length} follow-up(s) — captured in the report (--no-linear).`);
+  }
+
+  // (4.5) Ship the isolated worktree: commit → push → PR, linked to the audit
+  //       issue. Only the issue we created ourselves may be auto-closed by the
+  //       PR — an explicit `--issues <id>` parent belongs to the user. (INT-2905)
+  if (audit) {
+    await shipAuditWorktree(audit, run.summary, ts, {
+      issueId: parent.id,
+      identifier: parent.identifier,
+      closes: parent.created === true,
+    });
   }
 
   // (5) Learn: record the audit's top findings as one repo constraint so the
@@ -422,7 +583,7 @@ export async function createMasterAuditIssue(
   report: string,
   ts: string,
   projectId: string | undefined,
-): Promise<string | null> {
+): Promise<{ id: string; identifier: string } | null> {
   const source = await ensureTaskSource();
   if (!source) {
     console.log(status.warn('Linear not connected — report saved to file only. `openswarm auth login --provider linear` to enable.'));
@@ -433,7 +594,7 @@ export async function createMasterAuditIssue(
     const res = await source.createTask(title, report, projectId);
     if ('identifier' in res) {
       console.log(`${status.ok('Linear master audit issue')} ${c.cyan(res.identifier)}`);
-      return res.id;
+      return { id: res.id, identifier: res.identifier };
     }
     console.warn(`Could not create Linear issue (report saved to file): ${res.error}`);
     return null;
@@ -457,18 +618,18 @@ export async function filePmSynthesizedIssues(
   summary: AuditSummary,
   report: string,
   ts: string,
-): Promise<void> {
+): Promise<AuditIssueParent> {
   const actions = summary.recommendedActions;
   if (!actions.length) {
     console.log(status.info('No follow-ups to file.'));
-    return;
+    return {};
   }
   const source = await ensureTaskSource();
   if (!source) {
     console.log(
       status.warn('Could not file follow-ups: Linear not connected. Run `openswarm auth login --provider linear` (or set linearApiKey).'),
     );
-    return;
+    return {};
   }
   // Resolve the parent: explicit --issues <id>, else create the master report issue.
   const explicitParentId: string | undefined =
@@ -480,14 +641,20 @@ export async function filePmSynthesizedIssues(
   const mapping = await ensureProjectMapping(cwd, explicitParentId, { log: (l) => console.log(status.info(l)) });
   if (mapping.abort) {
     console.log(status.warn('Skipped filing follow-ups — map this repo to a Linear project first, then re-run.'));
-    return;
+    return {};
   }
   const projectId = mapping.projectId;
 
-  let parentId: string | undefined = explicitParentId;
-  if (!parentId && !opts.noLinear) {
-    parentId = (await createMasterAuditIssue(summary, report, ts, projectId)) ?? undefined;
+  // Track which issue the audit PR should reference, and whether we own it —
+  // only an issue we created may be auto-closed by that PR. (INT-2905)
+  const parent: AuditIssueParent = explicitParentId
+    ? { id: explicitParentId, identifier: /^[A-Za-z]+-\d+$/.test(explicitParentId) ? explicitParentId : undefined, created: false }
+    : {};
+  if (!parent.id && !opts.noLinear) {
+    const master = await createMasterAuditIssue(summary, report, ts, projectId);
+    if (master) Object.assign(parent, { id: master.id, identifier: master.identifier, created: true });
   }
+  const parentId = parent.id;
 
   console.log(`${status.running('PM synthesis')} ${c.yellow(`${actions.length} follow-up(s)`)} ${c.dim('into cohesive issues')}`);
   const issues = await synthesizeAuditIssues(actions, {
@@ -505,7 +672,7 @@ export async function filePmSynthesizedIssues(
           : 'PM synthesis produced no grouped issues — follow-ups are captured in the saved report.',
       ),
     );
-    return;
+    return parent;
   }
 
   let filed = 0;
@@ -535,4 +702,5 @@ export async function filePmSynthesizedIssues(
         : `Filed ${filed} synthesized issue(s).`
       : 'Could not file synthesized issues (0 created).',
   );
+  return parent;
 }

@@ -332,6 +332,10 @@ export async function createWorktree(
   repoPath: string,
   issueId: string,
   branchName: string,
+  /** Branch from this commit-ish instead of the remote's default branch, skipping
+   *  the fetch. Used by `review --max --fix`, which audits the code the user
+   *  currently has checked out (its HEAD), not the remote tip. (INT-2905) */
+  baseRefOverride?: string,
 ): Promise<WorktreeInfo> {
   const worktreePath = resolveWorktreePath(repoPath, issueId);
 
@@ -377,14 +381,18 @@ export async function createWorktree(
   // Resolve the repo's real base ref (remote + default branch) — NOT hardcoded
   // origin/main, which fataled on master-default / non-origin repos and blocked every
   // task in them. (INT-2545)
-  const base = await resolveBaseRef(repoPath);
-  await git(repoPath, 'fetch', base.remote, base.branch).catch((e) =>
-    console.warn(`[Worktree] Failed to fetch ${base.ref}:`, e)
-  );
+  let baseRef = baseRefOverride;
+  if (!baseRef) {
+    const base = await resolveBaseRef(repoPath);
+    await git(repoPath, 'fetch', base.remote, base.branch).catch((e) =>
+      console.warn(`[Worktree] Failed to fetch ${base.ref}:`, e)
+    );
+    baseRef = base.ref;
+  }
 
   // Create fresh worktree from the resolved base ref
-  await git(repoPath, 'worktree', 'add', '-b', branchName, worktreePath, base.ref);
-  console.log(`[Worktree] Created: ${worktreePath} (branch: ${branchName}, base: ${base.ref})`);
+  await git(repoPath, 'worktree', 'add', '-b', branchName, worktreePath, baseRef);
+  console.log(`[Worktree] Created: ${worktreePath} (branch: ${branchName}, base: ${baseRef})`);
 
   // Share the original repo's gitignored deps/data into the fresh worktree so the
   // worker can actually install / run tests / verify against real data. (INT-2415)
@@ -784,6 +792,96 @@ export async function commitAndCreatePR(
     }
   }
 
+  return url;
+}
+
+// Audit-fix PR (INT-2905)
+//
+// `review --max --fix` runs in its own worktree so the audit's edits never land
+// on the branch a worker/human is currently on. Its branch closes an audit issue
+// rather than implementing one, so it needs its own commit message and PR body —
+// hence a separate entry point from commitAndCreatePR above.
+
+export interface AuditPRRequest {
+  /** PR title. */
+  title: string;
+  /** Full PR body markdown (built by the caller). */
+  body: string;
+  /** Commit message for the accumulated fixes. */
+  commitMessage: string;
+  /** Branch the worktree forked from — the PR base when it exists on the remote. */
+  forkedFromBranch: string;
+  /** Commit the worktree forked from — commits after it are the audit's own. */
+  baseSha: string;
+}
+
+/**
+ * Commit the worktree's accumulated fixes, push the branch, and open a PR.
+ * Returns the PR url, or null when the audit changed nothing (no commits past
+ * `baseSha`) — the caller then discards the worktree.
+ */
+export async function commitAndCreateAuditPR(info: WorktreeInfo, req: AuditPRRequest): Promise<string | null> {
+  const { worktreePath, branchName } = info;
+
+  const dirty = await git(worktreePath, 'status', '--porcelain');
+  if (dirty.trim()) {
+    await git(worktreePath, 'add', '-A');
+    await guardUnsafeBinaryStaging(worktreePath); // INT-2430
+    const staged = await git(worktreePath, 'diff', '--cached', '--name-only');
+    if (staged.trim()) {
+      // Identity + --no-verify: an unattended audit must not die on an unset
+      // user.name or a repo pre-commit hook.
+      await git(
+        worktreePath,
+        '-c', 'user.email=swarm@openswarm.local', '-c', 'user.name=OpenSwarm',
+        'commit', '--no-verify', '-m', req.commitMessage,
+      );
+    }
+  }
+
+  // Count against the fork point, not the remote default branch: the worktree
+  // branched off the user's HEAD, which may itself be ahead of the default.
+  const ahead = await git(worktreePath, 'rev-list', '--count', `${req.baseSha}..HEAD`)
+    .then((out) => parseInt(out.trim(), 10))
+    .catch(() => 0);
+  if (!ahead) return null;
+
+  const base = await resolveBaseRef(worktreePath);
+  // PR into the branch we forked from when the remote has it; otherwise the diff
+  // would also contain that branch's own unmerged commits.
+  const onRemote = await git(worktreePath, 'ls-remote', '--exit-code', '--heads', base.remote, req.forkedFromBranch)
+    .then(() => true)
+    .catch(() => false);
+  const baseBranch = onRemote ? req.forkedFromBranch : base.branch;
+  if (!onRemote && req.forkedFromBranch !== base.branch) {
+    console.warn(`[Worktree] ${req.forkedFromBranch} is not on ${base.remote} — opening the audit PR against ${base.branch} instead.`);
+  }
+
+  // The audit forked from a LOCAL head, which may sit ahead of the PR base —
+  // those commits ride along in the PR diff. Say so rather than let a reviewer
+  // discover unrelated commits in an "audit fixes" PR.
+  const carried = await git(worktreePath, 'rev-list', '--count', `${base.remote}/${baseBranch}..${req.baseSha}`)
+    .then((out) => parseInt(out.trim(), 10))
+    .catch(() => 0);
+  if (carried > 0) {
+    console.warn(
+      `[Worktree] The audit forked from a HEAD ${carried} commit(s) ahead of ${base.remote}/${baseBranch} — ` +
+        'the PR carries those commits too.',
+    );
+  }
+
+  await git(worktreePath, 'push', '-u', base.remote, branchName, '--force-with-lease');
+
+  const existing = await gh(worktreePath, 'pr', 'list', '--head', branchName, '--state', 'open', '--json', 'url', '--jq', '.[0].url')
+    .catch(() => '');
+  if (existing.trim()) return existing.trim();
+
+  const url = (await gh(
+    worktreePath, 'pr', 'create',
+    '--head', branchName, '--base', baseBranch,
+    '--title', req.title, '--body', req.body,
+  )).trim();
+  console.log(`[Worktree] Audit PR created: ${url}`);
   return url;
 }
 

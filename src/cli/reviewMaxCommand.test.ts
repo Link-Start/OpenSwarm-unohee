@@ -28,7 +28,15 @@ vi.mock('../core/config.js', async () => {
   return { ...actual, loadConfig: (...args: unknown[]) => loadConfigMock(...args) };
 });
 
-const { filePerAreaFollowups, filePmSynthesizedIssues, reviewMaxResultFailed, loadVerifyConfigBestEffort } =
+const commitAndCreateAuditPRMock = vi.fn();
+const removeWorktreeMock = vi.fn();
+vi.mock('../support/worktreeManager.js', () => ({
+  commitAndCreateAuditPR: (...args: unknown[]) => commitAndCreateAuditPRMock(...args),
+  removeWorktree: (...args: unknown[]) => removeWorktreeMock(...args),
+  createWorktree: vi.fn(),
+}));
+
+const { filePerAreaFollowups, filePmSynthesizedIssues, reviewMaxResultFailed, loadVerifyConfigBestEffort, shipAuditWorktree } =
   await import('./reviewMaxCommand.js');
 
 function makeRun(actions: ReviewResult['recommendedActions']): AuditRun {
@@ -162,5 +170,75 @@ describe('filePmSynthesizedIssues (INT-2599)', () => {
       'body',
       expect.objectContaining({ projectId: 'proj-456' }),
     );
+  });
+});
+
+describe('shipAuditWorktree (INT-2905)', () => {
+  beforeEach(() => removeWorktreeMock.mockResolvedValue(undefined));
+  const audit = {
+    info: { worktreePath: '/repo/worktree/audit-1', branchName: 'swarm/audit-1', originalPath: '/repo', issueId: 'audit-1' },
+    baseSha: 'abc123',
+    forkedFromBranch: 'feat/in-flight',
+  };
+  const summary: AuditSummary = {
+    decision: 'revise',
+    totalAreas: 1,
+    completed: 1,
+    failed: 0,
+    areas: [],
+    issues: [],
+    recommendedActions: [{ type: 'bug', title: 'fix it' }],
+  };
+
+  it('closes the audit issue it created and comments the PR link', async () => {
+    commitAndCreateAuditPRMock.mockResolvedValue('https://example.test/pull/9');
+    const source = { addComment: vi.fn().mockResolvedValue(undefined) };
+    ensureTaskSourceMock.mockResolvedValue(source);
+
+    const url = await shipAuditWorktree(audit, summary, '2026-07-21T00-00-00', {
+      issueId: 'issue-uuid',
+      identifier: 'INT-9',
+      closes: true,
+    });
+
+    expect(url).toBe('https://example.test/pull/9');
+    const req = commitAndCreateAuditPRMock.mock.calls[0][1] as { body: string; baseSha: string; forkedFromBranch: string };
+    expect(req.body).toContain('Closes INT-9');
+    expect(req.baseSha).toBe('abc123');
+    expect(req.forkedFromBranch).toBe('feat/in-flight');
+    expect(source.addComment).toHaveBeenCalledWith('issue-uuid', expect.stringContaining('https://example.test/pull/9'));
+  });
+
+  it('only references — never closes — an issue the user passed with --issues', async () => {
+    commitAndCreateAuditPRMock.mockResolvedValue('https://example.test/pull/10');
+    ensureTaskSourceMock.mockResolvedValue({ addComment: vi.fn() });
+
+    await shipAuditWorktree(audit, summary, '2026-07-21T00-00-00', {
+      issueId: 'INT-9',
+      identifier: 'INT-9',
+      closes: false,
+    });
+
+    const req = commitAndCreateAuditPRMock.mock.calls[0][1] as { body: string };
+    expect(req.body).toContain('Refs INT-9');
+    expect(req.body).not.toContain('Closes');
+  });
+
+  it('discards the worktree when the audit changed nothing', async () => {
+    commitAndCreateAuditPRMock.mockResolvedValue(null);
+
+    const url = await shipAuditWorktree(audit, summary, '2026-07-21T00-00-00', { closes: false });
+
+    expect(url).toBeNull();
+    expect(removeWorktreeMock).toHaveBeenCalledWith(audit.info);
+  });
+
+  it('keeps the worktree and does not throw when the PR fails', async () => {
+    commitAndCreateAuditPRMock.mockRejectedValue(new Error('push rejected'));
+
+    const url = await shipAuditWorktree(audit, summary, '2026-07-21T00-00-00', { closes: false });
+
+    expect(url).toBeNull();
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
   });
 });
