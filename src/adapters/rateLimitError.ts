@@ -120,6 +120,71 @@ function extractResetsAt(headers: Headers | undefined, body: string): number | u
   return parseResetsAtFromBody(body);
 }
 
+// ---- 429: spent quota vs short-window throttle (INT-2907) ----
+//
+// A 429 is NOT automatically "your plan's quota is gone". The Codex/OpenAI
+// backends also 429 for short-window throttling (concurrent requests,
+// requests/min), which clears in seconds. Treating both the same made a
+// `review --max` run — 4 to 16 reviewer subagents hitting the API at once —
+// report `Codex usage limit hit` and fall back to claude on an account with
+// plenty of quota left, because reviewAudit skips every remaining area once one
+// area reports a limit. Only a response that PROVES the window is spent may
+// pause the scheduler / abort a run; everything else is waited out and retried.
+
+/** Body signatures that mean the quota itself is exhausted (not throttling). */
+const QUOTA_EXHAUSTED_SUBSTRINGS: readonly string[] = [
+  'usage_limit_reached',
+  'usage limit reached',
+  "you've hit your usage limit",
+  'hit your usage limit',
+  'insufficient_quota',
+  'exceeded your current quota',
+  'insufficient credits',
+  'requires more credits',
+  'purchase more credits',
+  'out of credits',
+  'out_of_credits',
+];
+
+export interface Codex429Classification {
+  /** True only when the response proves the plan window is spent. */
+  quota: boolean;
+  /** Retry-After in seconds, when the server specified one. */
+  retryAfterSeconds?: number;
+  /** Primary window usage from x-codex-primary-used-percent, when present. */
+  usedPercent?: number;
+}
+
+/**
+ * Classify a codex-responses 429 as a spent quota or a transient throttle.
+ * Deliberately does NOT reuse matchesRateLimitMessage: that registry includes
+ * throttle phrasings ('rate_limit_exceeded', 'too many requests') which are
+ * exactly what we need to tell apart here.
+ *
+ * Header provenance: `x-codex-primary-used-percent` / `-reset-at` /
+ * `-window-minutes` are the same headers rateLimitFromCodexHeaders has read
+ * since INT-2192, taken from real exhausted-quota 429s (they are what produced
+ * the observed "Codex 100% used of 300min window" message) — not invented here.
+ * A spent window therefore reports 100; anything below it, with no quota
+ * wording in the body, is throttling. Should a real exhaustion ever arrive
+ * under 100 with a silent body, the caller degrades to an infra error for that
+ * one call (retried later) rather than pausing on a limit that isn't there.
+ */
+export function classifyCodex429(headers: Headers | undefined, body: string): Codex429Classification {
+  const num = (k: string): number | undefined => {
+    const v = headers?.get(k);
+    const n = v == null ? NaN : parseInt(v, 10);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const usedPercent = num('x-codex-primary-used-percent');
+  const retryAfterSeconds = num('retry-after');
+  const lower = body.toLowerCase();
+  const quota =
+    QUOTA_EXHAUSTED_SUBSTRINGS.some((s) => lower.includes(s)) ||
+    (usedPercent != null && usedPercent >= 100);
+  return { quota, retryAfterSeconds, usedPercent };
+}
+
 /**
  * Build a RateLimitError from a codex-responses 429. The x-codex-* headers carry
  * far more than the body: primary window usage %, reset time, window length. (INT-2192)

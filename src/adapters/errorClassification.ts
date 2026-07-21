@@ -39,6 +39,7 @@ const INFRA_ERROR_PATTERNS = [
   'git-tracker:', // git snapshot/diff failed mid-run — infra, not a task verdict (colon-anchored to avoid prose) (INT-2521)
   'reviewer-stage:', // reviewer ran but its output couldn't be parsed into a verdict — infra, not a quality reject (INT-2521)
   'verify-runner:', // deterministic verifier could not execute; not a quality failure (INT-2662)
+  'codex-throttle:', // 429 short-window throttle survived its retry budget — infra, NOT a spent quota (INT-2907)
   'fetch failed', // undici: the real code hides in error.cause.code (checked below)
   'terminated', // undici mid-stream socket drop
   'unauthorized',

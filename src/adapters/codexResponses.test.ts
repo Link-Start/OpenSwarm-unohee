@@ -11,6 +11,7 @@ import {
   selectDefaultCodexResponseModel,
 } from './codexResponses.js';
 import { runAgenticLoop, type ChatMessage } from './agenticLoop.js';
+import { RateLimitError } from './rateLimitError.js';
 import type { ToolDefinition } from './tools.js';
 
 afterEach(() => {
@@ -390,4 +391,104 @@ describe('codex-responses live Spark smoke', () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   }, 180000);
+});
+
+describe('429 throttle vs spent quota (INT-2907)', () => {
+  type CreateApiCaller = (
+    initialToken: string,
+    accountId: string,
+    store: unknown,
+    model: string,
+  ) => (messages: ChatMessage[], tools: ToolDefinition[]) => Promise<unknown>;
+
+  const okStream = () =>
+    new Response(
+      [
+        'data: {"type":"response.output_text.delta","delta":"ok"}',
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+        'data: [DONE]',
+        '',
+      ].join('\n'),
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    );
+
+  const callerWith = (fetchMock: ReturnType<typeof vi.fn>) => {
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new CodexResponsesAdapter() as unknown as { createApiCaller: CreateApiCaller };
+    return adapter.createApiCaller('token', 'account', {}, 'gpt-5.5');
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('waits out a concurrency throttle and retries instead of reporting a usage limit', async () => {
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls++;
+      // Two throttles (quota to spare), then the real answer.
+      if (calls <= 2) {
+        return new Response('{"error":{"message":"Too many requests"}}', {
+          status: 429,
+          headers: { 'x-codex-primary-used-percent': '12' },
+        });
+      }
+      return okStream();
+    });
+    const callApi = callerWith(fetchMock);
+
+    vi.useFakeTimers();
+    const pending = callApi([{ role: 'user', content: 'hi' }], []);
+    await vi.advanceTimersByTimeAsync(5_000 + 15_000 + 2_000); // + jitter headroom
+    await expect(pending).resolves.toBeDefined();
+    expect(calls).toBe(3);
+  });
+
+  it('honors Retry-After for the wait', async () => {
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response('rate limited', { status: 429, headers: { 'retry-after': '3' } });
+      }
+      return okStream();
+    });
+    const callApi = callerWith(fetchMock);
+
+    vi.useFakeTimers();
+    const pending = callApi([{ role: 'user', content: 'hi' }], []);
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(calls).toBe(1); // still waiting out the server's Retry-After
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toBeDefined();
+    expect(calls).toBe(2);
+  });
+
+  it('fails fast on a genuinely spent quota — no retry, typed RateLimitError', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response('{"error":{"type":"usage_limit_reached","resets_at":1782824949}}', {
+        status: 429,
+        headers: { 'x-codex-primary-used-percent': '100', 'x-codex-primary-window-minutes': '300' },
+      }),
+    );
+    const callApi = callerWith(fetchMock);
+
+    await expect(callApi([{ role: 'user', content: 'hi' }], [])).rejects.toBeInstanceOf(RateLimitError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces a persistent throttle as infra, not as a usage limit', async () => {
+    const fetchMock = vi.fn(async () => new Response('busy', { status: 429 }));
+    const callApi = callerWith(fetchMock);
+
+    vi.useFakeTimers();
+    const pending = callApi([{ role: 'user', content: 'hi' }], []).catch((e: Error) => e);
+    await vi.advanceTimersByTimeAsync(5_000 + 15_000 + 40_000 + 3_000); // + jitter headroom
+    const err = (await pending) as Error;
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(RateLimitError);
+    expect(err.message).toContain('codex-throttle:');
+    expect(fetchMock).toHaveBeenCalledTimes(4); // initial + 3 retries
+  });
 });

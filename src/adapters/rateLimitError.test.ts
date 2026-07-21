@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { detectRateLimit, rateLimitFromCodexHeaders, rateLimitFromHttpResponse, matchesRateLimitMessage, RateLimitError } from './rateLimitError.js';
+import { classifyCodex429, detectRateLimit, rateLimitFromCodexHeaders, rateLimitFromHttpResponse, matchesRateLimitMessage, RateLimitError } from './rateLimitError.js';
+import { throttleWaitMs } from './codexResponses.js';
+import { isInfraError } from './errorClassification.js';
 import { runAgenticLoop } from './agenticLoop.js';
 
 // Every provider's REAL usage/rate-limit wire string must be recognised (audit
@@ -216,5 +218,57 @@ describe('rateLimitFromCodexHeaders (INT-2192)', () => {
     const err = rateLimitFromCodexHeaders(new Headers(), '{"error":{"type":"usage_limit_reached","resets_at":1782824949}}');
     expect(err.resetsAt).toBe(1782824949);
     expect(err.usedPercent).toBeUndefined();
+  });
+});
+
+describe('classifyCodex429 — spent quota vs short-window throttle (INT-2907)', () => {
+  it('treats a body quota signature as a spent quota', () => {
+    const c = classifyCodex429(new Headers(), '{"error":{"type":"usage_limit_reached","resets_at":1782824949}}');
+    expect(c.quota).toBe(true);
+  });
+
+  it('treats a 100%-consumed primary window as a spent quota even with a bare body', () => {
+    const c = classifyCodex429(new Headers({ 'x-codex-primary-used-percent': '100' }), 'Too Many Requests');
+    expect(c.quota).toBe(true);
+    expect(c.usedPercent).toBe(100);
+  });
+
+  it('treats a plain concurrency 429 as a throttle, not a quota', () => {
+    // The exact production shape: quota to spare, but 16 subagents at once.
+    const c = classifyCodex429(new Headers({ 'x-codex-primary-used-percent': '12' }), '{"error":{"message":"Too many requests"}}');
+    expect(c.quota).toBe(false);
+    expect(c.usedPercent).toBe(12);
+  });
+
+  it('does not promote rate_limit_exceeded (a throttle code) to a quota', () => {
+    expect(classifyCodex429(new Headers(), '{"code":"rate_limit_exceeded"}').quota).toBe(false);
+  });
+
+  it('surfaces Retry-After for the throttle wait', () => {
+    expect(classifyCodex429(new Headers({ 'retry-after': '7' }), '').retryAfterSeconds).toBe(7);
+    expect(classifyCodex429(new Headers(), '').retryAfterSeconds).toBeUndefined();
+  });
+});
+
+describe('throttle backoff + downstream classification (INT-2907)', () => {
+  it('honors Retry-After, caps it, and otherwise escalates the backoff', () => {
+    // Backoff carries up to 1s of jitter so concurrent subagents don't retry in lockstep.
+    for (const [attempt, base] of [[0, 5_000], [1, 15_000], [2, 40_000]] as const) {
+      const wait = throttleWaitMs(attempt);
+      expect(wait).toBeGreaterThanOrEqual(base);
+      expect(wait).toBeLessThan(base + 1_000);
+    }
+    expect(throttleWaitMs(0, 7)).toBe(7_000); // Retry-After honored verbatim (no jitter)
+    expect(throttleWaitMs(0, 9_999)).toBe(120_000); // capped
+    expect(throttleWaitMs(0, 0)).toBeGreaterThanOrEqual(5_000); // bogus Retry-After → backoff
+  });
+
+  it('classifies an exhausted throttle budget as infra, never as a rate limit', () => {
+    // Wording matters: if this message tripped detectRateLimit it would be
+    // re-promoted downstream and abort the whole review --max run again.
+    const msg = 'codex-throttle: persistent 429 after 3 retries (window 42% used)';
+    expect(matchesRateLimitMessage(msg)).toBe(false);
+    expect(detectRateLimit('', msg)).toBeNull();
+    expect(isInfraError(new Error(msg))).toBe(true);
   });
 });

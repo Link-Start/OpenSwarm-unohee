@@ -18,7 +18,7 @@ import { runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLo
 import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
 import { formatCost } from '../support/costTracker.js';
 import type { ToolDefinition } from './tools.js';
-import { RateLimitError, rateLimitFromCodexHeaders } from './rateLimitError.js';
+import { RateLimitError, classifyCodex429, rateLimitFromCodexHeaders } from './rateLimitError.js';
 import { isInfraError } from './errorClassification.js';
 
 import { getCodexModelIds } from './codexModels.js';
@@ -27,6 +27,43 @@ const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
 const DEFAULT_MODEL = 'gpt-5.5';
 const PROFILE_KEY = 'openai-gpt:default';
 const SPARK_MODEL = 'gpt-5.3-codex-spark';
+
+// ---- 429 throttle backoff (INT-2907) ----
+//
+// Waits for a short-window throttle (concurrency / requests-per-minute), NOT for
+// a spent plan quota — that still fails fast as a RateLimitError so the daemon
+// can pause and `review --max` can fall back.
+const THROTTLE_BACKOFF_MS = [5_000, 15_000, 40_000] as const;
+/** Cap on an honored Retry-After: past this, waiting costs more than retrying later. */
+const MAX_RETRY_AFTER_MS = 120_000;
+
+/** Wait for this attempt: the server's Retry-After when it gave one, else our
+ *  backoff plus jitter — `review --max` throttles come from up to 16 subagents
+ *  in flight, and an unjittered backoff has them all retry on the same tick and
+ *  re-trigger the very throttle they are waiting out. */
+export function throttleWaitMs(attempt: number, retryAfterSeconds?: number): number {
+  if (retryAfterSeconds != null && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+    return Math.min(retryAfterSeconds * 1000, MAX_RETRY_AFTER_MS);
+  }
+  const backoff = THROTTLE_BACKOFF_MS[Math.min(attempt, THROTTLE_BACKOFF_MS.length - 1)];
+  return backoff + Math.floor(Math.random() * 1000);
+}
+
+/** Sleep that a user abort (Esc/Ctrl+C) cuts short instead of blocking on. */
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('aborted'));
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('aborted'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 // ---- Responses API wire types (the subset we send/receive) ----
 
@@ -426,6 +463,9 @@ export class CodexResponsesAdapter implements CliAdapter {
     let effectiveModel = model;
 
     return async (messages: ChatMessage[], tools: ToolDefinition[]): Promise<ChatLikeResponse> => {
+      // Per-API-call throttle budget (a fresh one each turn — a wait that cleared
+      // one turn's throttle must not count against the next). (INT-2907)
+      let throttleAttempts = 0;
       const { instructions, input } = chatToResponsesInput(messages);
       const body: Record<string, unknown> = {
         model: effectiveModel,
@@ -462,10 +502,33 @@ export class CodexResponsesAdapter implements CliAdapter {
 
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
-          // 429 → typed RateLimitError carrying reset/usage from the rich x-codex-*
-          // response headers (used %, reset-at, window), not just the body. (INT-2192)
+          // 429 → a SPENT QUOTA gets the typed RateLimitError carrying reset/usage
+          // from the rich x-codex-* headers (used %, reset-at, window) (INT-2192);
+          // a short-window THROTTLE is waited out and retried instead, because
+          // pausing/aborting on it reported "usage limit hit" on accounts with
+          // quota to spare (review --max runs 4-16 subagents at once). (INT-2907)
           if (res.status === 429) {
-            throw rateLimitFromCodexHeaders(res.headers, errText);
+            const cls = classifyCodex429(res.headers, errText);
+            if (cls.quota) throw rateLimitFromCodexHeaders(res.headers, errText);
+            if (throttleAttempts < THROTTLE_BACKOFF_MS.length) {
+              const waitMs = throttleWaitMs(throttleAttempts, cls.retryAfterSeconds);
+              throttleAttempts++;
+              const window = cls.usedPercent != null ? `, window ${cls.usedPercent}% used` : '';
+              onReasoning?.(
+                `Codex throttled (429${window}) — waiting ${Math.round(waitMs / 1000)}s, ` +
+                  `retry ${throttleAttempts}/${THROTTLE_BACKOFF_MS.length}`,
+              );
+              await sleepAbortable(waitMs, signal);
+              return doCall(token);
+            }
+            // Still throttled after the full budget. NOT a quota event: surface it
+            // as infra (retried/backed off) instead of aborting the run as a usage
+            // limit. The wording deliberately avoids detectRateLimit's signatures
+            // so it is not re-promoted to a rate limit downstream.
+            throw new Error(
+              `codex-throttle: persistent 429 after ${throttleAttempts} retries` +
+                (cls.usedPercent != null ? ` (window ${cls.usedPercent}% used)` : ''),
+            );
           }
           // 401 → refresh once and retry.
           if (res.status === 401 && !retried) {
