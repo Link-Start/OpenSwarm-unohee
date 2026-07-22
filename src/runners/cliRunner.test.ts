@@ -31,22 +31,21 @@ import { runCli } from './cliRunner.js';
 
 describe('CLI runner failure cleanup', () => {
   const originalIsTTY = process.stdout.isTTY;
+  const originalExitCode = process.exitCode;
 
   afterEach(() => {
     mocks.stop.mockReset();
     mocks.handlers.clear();
     vi.restoreAllMocks();
     Object.defineProperty(process.stdout, 'isTTY', { value: originalIsTTY, configurable: true });
+    process.exitCode = originalExitCode;
   });
 
   it('stops the live progress heartbeat before exiting on a pipeline error', async () => {
     Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-      throw new Error(`exit:${code}`);
-    }) as never);
-
-    await expect(runCli({ task: 'test', projectPath: process.cwd() })).rejects.toThrow('exit:1');
+    await expect(runCli({ task: 'test', projectPath: process.cwd() })).resolves.toBeUndefined();
+    expect(process.exitCode).toBe(1);
     expect(mocks.stop).toHaveBeenCalledTimes(1);
   });
 });
