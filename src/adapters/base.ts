@@ -28,13 +28,16 @@ export async function spawnCli(
 
   const promptFile = `/tmp/openswarm-prompt-${Date.now()}.txt`;
   await fs.writeFile(promptFile, options.prompt);
+  let cleanupPaths: string[] = [];
 
   try {
-    const { command, args, stdinFile } = adapter.buildCommand({
+    const commandSpec = adapter.buildCommand({
       ...options,
       // Pass the temp file path as the prompt so buildCommand can reference it
       prompt: promptFile,
     });
+    const { command, args, stdinFile } = commandSpec;
+    cleanupPaths = commandSpec.cleanupPaths ?? [];
 
     const stdin = stdinFile ? await fs.readFile(stdinFile) : undefined;
     const startTime = Date.now();
@@ -147,6 +150,9 @@ export async function spawnCli(
       await fs.unlink(promptFile);
     } catch {
       // Ignore cleanup errors
+    }
+    for (const cleanupPath of cleanupPaths) {
+      await fs.rm(cleanupPath, { recursive: true, force: true }).catch(() => {});
     }
   }
 }

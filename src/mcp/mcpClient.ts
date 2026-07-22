@@ -394,5 +394,7 @@ function renderMcpToolContent(content: Array<{ type?: string; text?: string }>):
       break;
     }
   }
-  return truncated ? `${out}\n[truncated MCP tool result at ${MAX_MCP_TOOL_RESULT_CHARS} chars]` : out;
+  if (!truncated) return out;
+  const marker = `\n[truncated MCP tool result at ${MAX_MCP_TOOL_RESULT_CHARS} chars]`;
+  return `${out.slice(0, MAX_MCP_TOOL_RESULT_CHARS - marker.length)}${marker}`;
 }

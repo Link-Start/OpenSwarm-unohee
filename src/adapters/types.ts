@@ -133,6 +133,8 @@ export interface CliCommandSpec {
   args: string[];
   /** Feed this file to child stdin without involving a shell or argv. */
   stdinFile?: string;
+  /** Adapter-owned temporary paths removed after the child settles. */
+  cleanupPaths?: string[];
 }
 
 /**

@@ -196,6 +196,16 @@ describe('initMcpTools / callMcpTool regressions', () => {
     clientMock.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'done' }] });
     await expect(callMcpTool('svc__ok', {})).resolves.toEqual({ content: 'done', isError: false });
   });
+
+  it('keeps the truncation marker inside the configured result cap', async () => {
+    clientMock.listTools.mockResolvedValue({ tools: [{ name: 'large', inputSchema: { type: 'object' } }] });
+    await initMcpTools(registry);
+    clientMock.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'x'.repeat(25_000) }] });
+
+    const result = await callMcpTool('svc__large', {});
+    expect(result.content).toHaveLength(20_000);
+    expect(result.content).toContain('[truncated MCP tool result');
+  });
 });
 
 describe('withDeadline', () => {

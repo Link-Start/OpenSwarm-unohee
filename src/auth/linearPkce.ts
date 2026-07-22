@@ -73,6 +73,15 @@ export function parseLinearTokenResponse(value: unknown): LinearFlowResult {
   return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiresIn: tokens.expires_in };
 }
 
+export function isValidLinearCallback(
+  code: string | null,
+  error: string | null,
+  returnedState: string | null,
+  expectedState: string,
+): boolean {
+  return returnedState === expectedState && (!!code || !!error);
+}
+
 /**
  * Linear OAuth 2.0 PKCE flow.
  *   1. generate PKCE verifier/challenge + state
@@ -138,6 +147,16 @@ export async function runLinearPkceFlow(options: LinearFlowOptions = {}): Promis
         return;
       }
 
+      if (!isValidLinearCallback(code, error, returnedState, state)) {
+        settlement.finish();
+        clearTimeout(timeout);
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(errorHtml('Invalid callback parameters'));
+        server.close();
+        reject(new Error('Invalid Linear callback: missing code or state mismatch'));
+        return;
+      }
+
       if (error) {
         settlement.finish();
         clearTimeout(timeout);
@@ -148,20 +167,10 @@ export async function runLinearPkceFlow(options: LinearFlowOptions = {}): Promis
         return;
       }
 
-      if (!code || returnedState !== state) {
-        settlement.finish();
-        clearTimeout(timeout);
-        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(errorHtml('Invalid callback parameters'));
-        server.close();
-        reject(new Error('Invalid Linear callback: missing code or state mismatch'));
-        return;
-      }
-
       try {
         const tokenBody = new URLSearchParams({
           grant_type: 'authorization_code',
-          code,
+          code: code!,
           code_verifier: codeVerifier,
           redirect_uri: redirectUri,
           client_id: clientId,

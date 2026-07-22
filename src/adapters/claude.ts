@@ -5,6 +5,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { dirname } from 'node:path';
 import type {
   CliAdapter,
   CliRunOptions,
@@ -62,10 +63,16 @@ export class ClaudeCliAdapter implements CliAdapter {
     // Register OpenSwarm's memory MCP server unless the caller needs an isolated run.
     // bypassPermissions auto-allows its tool when present.
     const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions'];
-    if (options.memoryTools !== false) args.push('--mcp-config', writeClaudeMcpConfig());
+    const mcpConfig = options.memoryTools !== false ? writeClaudeMcpConfig() : undefined;
+    if (mcpConfig) args.push('--mcp-config', mcpConfig);
     args.push('--model', model);
     if (options.maxTurns) args.push('--max-turns', String(options.maxTurns));
-    return { command: 'claude', args, stdinFile: promptFile };
+    return {
+      command: 'claude',
+      args,
+      stdinFile: promptFile,
+      cleanupPaths: mcpConfig ? [dirname(mcpConfig)] : [],
+    };
   }
 
   async getDefaultModel(): Promise<string> {

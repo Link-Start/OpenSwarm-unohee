@@ -3,6 +3,9 @@
 // Test Status: Complete
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdir, utimes, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import { AgentBus, createBus, type StepCompletedPayload, type ContextUpdatePayload, type FileChangedPayload } from './agentBus.js';
 
 describe('agentBus', () => {
@@ -32,6 +35,11 @@ describe('agentBus', () => {
       const bus = createBus(customId);
 
       expect(bus).toBeDefined();
+    });
+
+    it('rejects execution IDs that can escape the bus directory', () => {
+      expect(() => createBus('../outside')).toThrow('Invalid AgentBus execution ID');
+      expect(() => createBus('/absolute')).toThrow('Invalid AgentBus execution ID');
     });
 
     it('should generate unique IDs for different buses', () => {
@@ -236,6 +244,21 @@ describe('agentBus', () => {
       expect(await first.getData('second')).toBe('two');
       await first.cleanup();
       await second.cleanup();
+    });
+
+    it('recovers a stale context lock left by a crashed process', async () => {
+      const executionId = `stale-lock-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const staleBus = createBus(executionId);
+      await staleBus.init('workflow-123');
+      const lockPath = resolve(homedir(), '.openswarm', 'bus', executionId, 'context.lock');
+      await mkdir(lockPath);
+      const old = new Date(Date.now() - 60_000);
+      await utimes(lockPath, old, old);
+
+      await staleBus.setData('recovered', true);
+
+      expect(await staleBus.getData('recovered')).toBe(true);
+      await staleBus.cleanup();
     });
 
     it('should set custom data', async () => {
@@ -576,6 +599,31 @@ describe('agentBus', () => {
       expect(received).toHaveBeenCalledTimes(2);
       await publisher.cleanup();
       await subscriber.cleanup();
+    });
+
+    it('does not skip a later-written message whose filename sorts earlier', async () => {
+      const executionId = `ordering-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const orderingBus = createBus(executionId);
+      await orderingBus.init('workflow-123');
+      const messagesPath = resolve(homedir(), '.openswarm', 'bus', executionId, 'messages');
+      const received = vi.fn();
+      orderingBus.on('log', received);
+      const message = (id: string) => JSON.stringify({
+        id,
+        timestamp: 1,
+        type: 'log',
+        sender: 'test',
+        executionId,
+        payload: id,
+      });
+
+      await writeFile(resolve(messagesPath, '1000-z.json'), message('z'));
+      await orderingBus.pollOnce();
+      await writeFile(resolve(messagesPath, '1000-a.json'), message('a'));
+      await orderingBus.pollOnce();
+
+      expect(received).toHaveBeenCalledTimes(2);
+      await orderingBus.cleanup();
     });
 
     it('should start polling', async () => {

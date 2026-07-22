@@ -91,6 +91,17 @@ export interface SharedContext {
 // Bus Implementation (File-based)
 
 const BUS_DIR = resolve(homedir(), '.openswarm/bus');
+const CONTEXT_LOCK_STALE_MS = 30_000;
+
+function assertExecutionId(executionId: string): void {
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(executionId) ||
+    executionId === '.' ||
+    executionId === '..'
+  ) {
+    throw new Error(`Invalid AgentBus execution ID: ${JSON.stringify(executionId)}`);
+  }
+}
 
 /**
  * Message bus class
@@ -102,10 +113,11 @@ export class AgentBus {
   private listeners: Map<MessageType, Array<(msg: AgentMessage) => void>> = new Map();
   private pollInterval: NodeJS.Timeout | null = null;
   private pollInFlight = false;
-  private lastMessageId: string = '';
+  private readonly processedMessageIds = new Set<string>();
   private readonly contextLockPath: string;
 
   constructor(executionId: string) {
+    assertExecutionId(executionId);
     this.executionId = executionId;
     this.contextPath = resolve(BUS_DIR, executionId, 'context.json');
     this.messagesPath = resolve(BUS_DIR, executionId, 'messages');
@@ -256,7 +268,9 @@ export class AgentBus {
         await fs.mkdir(this.contextLockPath);
         break;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || Date.now() >= deadline) throw error;
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (await this.recoverStaleContextLock()) continue;
+        if (Date.now() >= deadline) throw error;
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
     }
@@ -264,6 +278,21 @@ export class AgentBus {
       return await operation();
     } finally {
       await fs.rmdir(this.contextLockPath).catch(() => {});
+    }
+  }
+
+  private async recoverStaleContextLock(): Promise<boolean> {
+    try {
+      const stats = await fs.stat(this.contextLockPath);
+      if (Date.now() - stats.mtimeMs < CONTEXT_LOCK_STALE_MS) return false;
+      const stalePath = `${this.contextLockPath}.stale.${process.pid}.${Math.random().toString(36).slice(2)}`;
+      await fs.rename(this.contextLockPath, stalePath);
+      await fs.rm(stalePath, { recursive: true, force: true });
+      console.warn(`[AgentBus] Recovered stale context lock for ${this.executionId}`);
+      return true;
+    } catch (error) {
+      if (['ENOENT', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) return false;
+      throw error;
     }
   }
 
@@ -346,7 +375,7 @@ export class AgentBus {
     try {
       const files = await fs.readdir(this.messagesPath);
       const newFiles = files
-        .filter(f => f.endsWith('.json') && f > this.lastMessageId)
+        .filter(f => f.endsWith('.json') && !this.processedMessageIds.has(f))
         .sort();
 
       for (const file of newFiles) {
@@ -365,7 +394,7 @@ export class AgentBus {
           }
         }
 
-        this.lastMessageId = file;
+        this.processedMessageIds.add(file);
       }
     } catch {
       // Ignore
