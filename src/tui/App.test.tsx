@@ -47,4 +47,15 @@ describe('Ink shell (EPIC INT-1813 S3/S4/S5)', () => {
     const { lastFrame } = render(<App initialTab={6} />); // Logs
     expect(lastFrame()).toContain('stream logs');
   });
+
+  it.each([-1, 7, Number.NaN])('normalizes invalid initialTab %s', (initialTab) => {
+    // Chat mounts async work; leaving it mounted lets it log after teardown
+    // and vitest reports that as an unhandled EnvironmentTeardownError.
+    const { lastFrame, unmount } = render(<App initialTab={initialTab} />);
+    try {
+      expect(lastFrame()).toContain('type a message');
+    } finally {
+      unmount();
+    }
+  });
 });
