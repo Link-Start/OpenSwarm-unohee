@@ -38,6 +38,7 @@ export class GptCliAdapter implements CliAdapter {
   };
 
   async isAvailable(): Promise<boolean> {
+    if (process.env.OPENAI_API_KEY?.trim()) return true;
     try {
       const store = new AuthProfileStore();
       const profile = store.getProfile(PROFILE_KEY);
@@ -57,20 +58,31 @@ export class GptCliAdapter implements CliAdapter {
   }
 
   async run(options: CliRunOptions): Promise<CliRunResult> {
-    const store = new AuthProfileStore();
     const startTime = Date.now();
 
-    // 1. 유효한 토큰 획득
+    // Acquire a bearer: OPENAI_API_KEY takes precedence (headless CI — the
+    // endpoint is standard api.openai.com, so a plain API key works and needs
+    // no refresh flow); otherwise the ChatGPT OAuth profile. The store is only
+    // constructed on the OAuth path: its constructor throws on a corrupt file
+    // or invalid OPENSWARM_AUTH_PROFILES, which must not block a caller who
+    // authenticated by key. (INT-3101)
+    const envKey = process.env.OPENAI_API_KEY?.trim();
+    let store: AuthProfileStore | null = null;
     let accessToken: string;
-    try {
-      accessToken = await ensureValidToken(store, PROFILE_KEY);
-    } catch (err) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: `Auth error: ${err instanceof Error ? err.message : String(err)}`,
-        durationMs: Date.now() - startTime,
-      };
+    if (envKey) {
+      accessToken = envKey;
+    } else {
+      try {
+        store = new AuthProfileStore();
+        accessToken = await ensureValidToken(store, PROFILE_KEY);
+      } catch (err) {
+        return {
+          exitCode: 1,
+          stdout: '',
+          stderr: `Auth error: ${err instanceof Error ? err.message : String(err)} (or set OPENAI_API_KEY)`,
+          durationMs: Date.now() - startTime,
+        };
+      }
     }
 
     const model = options.model ?? await this.getDefaultModel();
@@ -131,13 +143,16 @@ export class GptCliAdapter implements CliAdapter {
    */
   private createApiCaller(
     initialToken: string,
-    store: AuthProfileStore,
+    /** Null when the bearer is a plain API key — there is no profile to refresh on 401. (INT-3101) */
+    store: AuthProfileStore | null,
     model: string,
     onToken?: (delta: string) => void,
     signal?: AbortSignal,
   ) {
     let token = initialToken;
-    let retried = false;
+    // An env API key has no refresh flow; a 401 on it must surface as the auth
+    // error it is instead of failing on a missing OAuth profile.
+    let retried = store === null;
 
     return async (messages: ChatMessage[], tools: ToolDefinition[]) => {
       // Per-API-call throttle budget (INT-2907).
@@ -168,8 +183,9 @@ export class GptCliAdapter implements CliAdapter {
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
 
-          // 401 → 토큰 갱신 후 1회 재시도
-          if (res.status === 401 && !retried) {
+          // 401 → refresh the OAuth token and retry once. `retried` starts true
+          // on the API-key path, so `store` is always present here.
+          if (res.status === 401 && !retried && store) {
             retried = true;
             token = await refreshExpiredProfileForRetry(store);
             return doCall(token);

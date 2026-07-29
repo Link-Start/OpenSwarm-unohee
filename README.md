@@ -132,6 +132,43 @@ Treat any non-zero exit as a failed check. The `1`/`2` split lets a workflow
 retry or alert differently when the gate could not run at all (e.g. a quota
 window exhausted — stderr names the cause and, when known, the reset time).
 
+### CI merge gate (GitHub Action)
+
+Run the reviewer as a PR check with the bundled action:
+
+```yaml
+# .github/workflows/review.yml
+on:
+  pull_request:
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # the base ref must exist locally to diff against
+      - uses: unohee/OpenSwarm@main
+        with:
+          adapter: openrouter    # any API-key adapter: openrouter | atlascloud | gpt
+          model: openai/gpt-5-mini
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+```
+
+The check fails on a reject verdict (exit 1) and on a gate that could not run
+(exit 2 — quota/infra; see the exit-code table above). Outputs: `decision`
+(`APPROVE`/`REVISE`/`REJECT`) and `exit-code`.
+
+Headless authentication options:
+
+- **API-key adapters** (recommended for CI): `OPENROUTER_API_KEY`,
+  `ATLASCLOUD_API_KEY`, or `OPENAI_API_KEY` (the `gpt` adapter accepts a plain
+  key and skips the OAuth store).
+- **Subscription OAuth** (`codex-responses`): put the contents of your local
+  `~/.openswarm/auth-profiles.json` into a secret and export it as
+  `OPENSWARM_AUTH_PROFILES` — the store reads it when the file is absent
+  (env wins over a stale file).
+
 ### Deterministic verification
 
 Autonomous pipelines enable baseline-diff verification by default: OpenSwarm runs repository test/typecheck commands once, compares a failing head against the merge base, and gives the reviewer structured evidence so pre-existing failures do not block unrelated work. Add `.openswarm/verify.yaml` for repository-specific commands (see [`templates/verify.example.yaml`](templates/verify.example.yaml)), or let OpenSwarm discover standard Node, Python, Rust, and Go checks. Configure the behavior under `autonomous.verify`; the legacy `guards.qualityGate` whole-tree check is deprecated.

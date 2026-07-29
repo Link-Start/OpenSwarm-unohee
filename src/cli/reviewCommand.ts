@@ -205,6 +205,8 @@ export interface ReviewCommandOptions {
   fileIssue?: string | boolean;
   /** Adapter override. */
   adapter?: string;
+  /** Model override for the reviewer (CI cost control). (INT-3101) */
+  model?: string;
   /** Verbose logging. */
   debug?: boolean;
   /**
@@ -247,7 +249,22 @@ export async function runReviewCommand(
   const cwd = opts.path ?? process.cwd();
   const log = deps.log ?? ((l: string) => console.log(l));
 
-  const getChangedFiles = deps.getChangedFiles ?? (async (c) => (await import('../support/gitTracker.js')).getChangedFiles(c, opts.base));
+  const getChangedFiles = deps.getChangedFiles ?? (async (c) => {
+    if (opts.base) {
+      // An unresolvable base ref must be gate-not-run, not "no changes": in CI
+      // it means a missing fetch (actions/checkout fetch-depth default is 1) or
+      // a typo, and gitTracker's [] fallback would read as a pass. (INT-3101)
+      const { execFile } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      await promisify(execFile)('git', ['rev-parse', '--verify', '--quiet', `${opts.base}^{commit}`], { cwd: c }).catch(() => {
+        throw new Error(
+          `--base ${opts.base} does not resolve to a commit in ${c}. ` +
+            'In CI, fetch the base ref first (e.g. actions/checkout with fetch-depth: 0).',
+        );
+      });
+    }
+    return (await import('../support/gitTracker.js')).getChangedFiles(c, opts.base);
+  });
   // Review reports/history are OpenSwarm's own local state. Repositories are
   // expected to ignore `.openswarm/`, but filter it here as well so a repo that
   // has not added the ignore rule cannot make each review trigger another one.
@@ -286,6 +303,7 @@ export async function runReviewCommand(
         workerResult: wr,
         projectPath: c,
         adapterName: opts.adapter as never,
+        model: opts.model,
         mode: 'direct',
         priorReviewContext: history.context,
         onLog,

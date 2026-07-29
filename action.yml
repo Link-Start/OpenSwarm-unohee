@@ -1,0 +1,105 @@
+name: 'OpenSwarm Agentic Review'
+description: >-
+  Agentic code-review merge gate: reviews the PR diff with an LLM reviewer.
+  Fails the check on a reject verdict, and distinguishes "the gate did not run"
+  (provider quota, adapter failure) from a real rejection.
+author: 'Intrect'
+branding:
+  icon: 'eye'
+  color: 'purple'
+
+inputs:
+  adapter:
+    description: >-
+      Reviewer adapter: openrouter | atlascloud | gpt | codex-responses |
+      codex | claude. API-key adapters (openrouter, atlascloud, gpt) are the
+      recommended CI path — pass the key via env on this step.
+    required: false
+    default: 'openrouter'
+  model:
+    description: 'Model override for the reviewer (e.g. openai/gpt-5-mini on openrouter). Empty = adapter default.'
+    required: false
+    default: ''
+  base:
+    description: >-
+      Base ref to diff against. Defaults to the PR base branch
+      (origin/$GITHUB_BASE_REF) on pull_request events.
+    required: false
+    default: ''
+  version:
+    description: >-
+      npm version of @intrect/openswarm to install. The special value 'local'
+      builds and installs from the action checkout itself — only for developing
+      this action inside the OpenSwarm repository.
+    required: false
+    default: 'latest'
+  extra-args:
+    description: 'Extra arguments appended to the `openswarm review` invocation.'
+    required: false
+    default: ''
+
+outputs:
+  decision:
+    description: 'Reviewer verdict: APPROVE | REVISE | REJECT (empty when the gate did not run).'
+    value: ${{ steps.review.outputs.decision }}
+  exit-code:
+    description: '0 = pass, 1 = reject, 2 = gate did not run (see README exit-code contract).'
+    value: ${{ steps.review.outputs.exit-code }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install OpenSwarm
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        if [ "$INPUT_VERSION" = "local" ]; then
+          # Developing the action inside the OpenSwarm repo: build the checkout.
+          (cd "$GITHUB_ACTION_PATH" && npm ci && npm run build && npm install -g .)
+        else
+          npm install -g "@intrect/openswarm@$INPUT_VERSION"
+        fi
+
+    - name: Review
+      id: review
+      shell: bash
+      env:
+        INPUT_ADAPTER: ${{ inputs.adapter }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: |
+        set -uo pipefail
+        BASE="${INPUT_BASE}"
+        if [ -z "$BASE" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+          BASE="origin/${GITHUB_BASE_REF}"
+        fi
+        if [ -z "$BASE" ]; then
+          echo "::error::No base ref: set the 'base' input (push builds have no GITHUB_BASE_REF)."
+          exit 2
+        fi
+        # A shallow checkout (actions/checkout default fetch-depth: 1) has no
+        # base commit to diff against — fetch it rather than silently pass.
+        if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
+          git fetch --no-tags origin "${BASE#origin/}" || true
+        fi
+
+        MODEL_ARGS=()
+        if [ -n "$INPUT_MODEL" ]; then MODEL_ARGS=(--model "$INPUT_MODEL"); fi
+
+        set +e
+        openswarm review --base "$BASE" --adapter "$INPUT_ADAPTER" "${MODEL_ARGS[@]}" $INPUT_EXTRA_ARGS | tee review-output.txt
+        CODE=${PIPESTATUS[0]}
+        set -e
+
+        DECISION=$(grep -oE 'Decision: (APPROVE|REVISE|REJECT)' review-output.txt | head -1 | cut -d' ' -f2 || true)
+        echo "decision=${DECISION}" >> "$GITHUB_OUTPUT"
+        echo "exit-code=${CODE}" >> "$GITHUB_OUTPUT"
+
+        if [ "$CODE" -eq 2 ]; then
+          echo "::error::Review gate did NOT run (exit 2) — provider quota or infrastructure failure. This is not a pass."
+        elif [ "$CODE" -ne 0 ]; then
+          echo "::error::Review verdict: ${DECISION:-REJECT} (exit $CODE)."
+        fi
+        exit "$CODE"

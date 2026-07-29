@@ -1,0 +1,53 @@
+name: Agentic Review
+
+# Dogfood the repo-root action (action.yml) as a PR merge gate. Skips cleanly
+# when the OPENROUTER_API_KEY secret is absent (forks), so it never fails a
+# contributor's PR for a missing credential. (INT-3101)
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    name: OpenSwarm Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The action diffs against the PR base ref — it must exist locally.
+          fetch-depth: 0
+
+      - name: Check credential
+        id: cred
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -n "$OPENROUTER_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "OPENROUTER_API_KEY secret not set — skipping the agentic review gate."
+          fi
+
+      - name: Agentic review
+        if: steps.cred.outputs.present == 'true'
+        id: gate
+        uses: ./
+        with:
+          adapter: openrouter
+          model: openai/gpt-5-mini
+          # Dogfood the checked-out source, not the npm release — PRs must be
+          # gated by the code they carry.
+          version: local
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+      - name: Report
+        if: steps.cred.outputs.present == 'true'
+        run: |
+          echo "Decision: ${{ steps.gate.outputs.decision }} (exit ${{ steps.gate.outputs.exit-code }})"

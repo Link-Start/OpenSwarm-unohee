@@ -73,6 +73,40 @@ const TOKEN_ENDPOINTS: Record<string, string> = {
 
 // AuthProfileStore
 
+/**
+ * Headless auth injection (INT-3101): `OPENSWARM_AUTH_PROFILES` carries the
+ * contents of auth-profiles.json (the same `{version: 1, profiles: {...}}`
+ * envelope) as an environment secret, so CI containers with no browser,
+ * keyring, or home-directory state can authenticate. Copy the local file into
+ * the secret verbatim: `cat ~/.openswarm/auth-profiles.json`.
+ *
+ * The variable is an explicit opt-in, so a malformed value throws instead of
+ * silently ignoring the caller's credentials. Returns undefined when unset.
+ */
+function loadEnvInjectedProfiles(): Record<string, AuthProfile> | undefined {
+  const raw = process.env.OPENSWARM_AUTH_PROFILES?.trim();
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error('OPENSWARM_AUTH_PROFILES is set but is not valid JSON', { cause: error });
+  }
+  if (!isRecord(parsed) || parsed.version !== 1 || !isRecord(parsed.profiles)) {
+    throw new Error(
+      'OPENSWARM_AUTH_PROFILES must hold the auth-profiles.json envelope: {"version": 1, "profiles": {...}}',
+    );
+  }
+  const profiles: Record<string, AuthProfile> = {};
+  for (const [key, value] of Object.entries(parsed.profiles)) {
+    if (!isAuthProfile(value)) {
+      throw new Error(`OPENSWARM_AUTH_PROFILES profile "${key}" does not match the auth profile schema`);
+    }
+    profiles[key] = value;
+  }
+  return profiles;
+}
+
 export class AuthProfileStore {
   private data: AuthProfileFile;
   /** Keys this instance changed, so save() only applies those onto the file. */
@@ -93,8 +127,9 @@ export class AuthProfileStore {
    * there is genuinely nothing to salvage.
    */
   private load(): AuthProfileFile {
+    const injected = loadEnvInjectedProfiles();
     if (!existsSync(STORE_PATH)) {
-      return { version: 1, profiles: {} };
+      return { version: 1, profiles: injected ?? {} };
     }
 
     let parsed: unknown;
@@ -124,7 +159,9 @@ export class AuthProfileStore {
           `Re-run auth login for those providers; other providers are unaffected.`,
       );
     }
-    return { version: 1, profiles };
+    // Env-injected profiles win over the disk copy: in CI the secret is the
+    // caller's explicit intent, and a stale baked-in file must not shadow it.
+    return { version: 1, profiles: { ...profiles, ...injected } };
   }
 
   /**
